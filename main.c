@@ -6,6 +6,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -328,6 +329,19 @@ static char *put_int(char *p, int v)
 #define LINE_SLACK 64
 #define CHUNK_LINES 16384
 
+/* Java's (int) narrowing of a double saturates to Integer.MAX_VALUE (JLS
+ * 5.1.3); C leaves it undefined once the truncated value will not fit. hypot
+ * of two int32 coordinates reaches ~3.04e9, so clamp to match Java instead of
+ * relying on UB. Truncation is still exact below 2^31, so ordinary searches are
+ * unaffected. hypot of two finite doubles is always finite and non-negative, so
+ * there is no NaN or infinity case to handle. */
+static int hypot_i(int32_t x, int32_t z)
+{
+	double d = hypot((double)x, (double)z);
+
+	return d >= 2147483648.0 ? INT_MAX : (int)d;
+}
+
 static char *format_range(char *p, size_t lo, size_t hi)
 {
 	size_t i;
@@ -339,7 +353,7 @@ static char *format_range(char *p, size_t lo, size_t hi)
 		p = put_int(p, matches[i].z);
 		*p++ = ' ';
 		*p++ = '(';
-		p = put_int(p, (int)hypot(matches[i].x, matches[i].z));
+		p = put_int(p, hypot_i(matches[i].x, matches[i].z));
 		memcpy(p, " blocks from origin)\n", 21);
 		p += 21;
 	}
@@ -377,7 +391,7 @@ static void emit_matches(void)
 		free(len);
 		for (i = 0; i < nmatches; i++)
 			printf("@%d;%d (%d blocks from origin)\n", matches[i].x,
-			       matches[i].z, (int)hypot(matches[i].x, matches[i].z));
+			       matches[i].z, hypot_i(matches[i].x, matches[i].z));
 		return;
 	}
 
@@ -405,24 +419,74 @@ static void emit_matches(void)
 	free(len);
 }
 
+/* Per-thread match lists. A single shared list behind `omp critical` serialised
+ * on every hit, so match-heavy searches got *slower* with more threads: 0.23 s
+ * at 1 thread against 0.66 s at 12. Threads accumulate locally and the lists are
+ * concatenated afterwards -- sort_matches orders the result regardless, so the
+ * concatenation order does not matter. */
 static void cpu_search(const bd_derivers *d, int xf, int zf, int xt, int zt)
 {
-	int x;
+	bd_match **tm;
+	size_t *tn;
+	int t, nthreads = 1;
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic, 8)
+	nthreads = omp_get_max_threads();
 #endif
-	for (x = xf; x < xt; x++) {
-		int z;
+	if (nthreads < 1)
+		nthreads = 1;
+	tm = (bd_match **)calloc((size_t)nthreads, sizeof *tm);
+	tn = (size_t *)calloc((size_t)nthreads, sizeof *tn);
+	if (!tm || !tn)
+		die("out of memory");
 
-		for (z = zf; z < zt; z++)
-			if (bd_check(d, blocks, nblocks, x, z)) {
 #ifdef _OPENMP
-#pragma omp critical
+#pragma omp parallel
 #endif
-				bd_add_match(x, z);
-			}
+	{
+		bd_match *lm = NULL;
+		size_t ln = 0, lc = 0;
+		int id = 0, x;
+
+#ifdef _OPENMP
+		id = omp_get_thread_num();
+#pragma omp for schedule(dynamic, 8) nowait
+#endif
+		for (x = xf; x < xt; x++) {
+			int z;
+
+			for (z = zf; z < zt; z++)
+				if (bd_check(d, blocks, nblocks, x, z)) {
+					if (ln == lc) {
+						lc = lc ? lc * 2 : 1024;
+						lm = (bd_match *)xrealloc(lm, lc * sizeof *lm);
+					}
+					lm[ln].x = x;
+					lm[ln].z = z;
+					ln++;
+				}
+		}
+		/* one write per thread, after the loop, so no false sharing on the
+		 * hot path; the parallel region's implicit barrier publishes them */
+		tm[id] = lm;
+		tn[id] = ln;
 	}
+
+	for (t = 0; t < nthreads; t++) {
+		if (tn[t]) {
+			if (nmatches + tn[t] > capmatches) {
+				while (capmatches < nmatches + tn[t])
+					capmatches = capmatches ? capmatches * 2 : 1024;
+				matches = (bd_match *)xrealloc(matches,
+				                               capmatches * sizeof *matches);
+			}
+			memcpy(matches + nmatches, tm[t], tn[t] * sizeof *tm[t]);
+			nmatches += tn[t];
+		}
+		free(tm[t]);
+	}
+	free(tm);
+	free(tn);
 }
 
 #ifdef USE_CUDA

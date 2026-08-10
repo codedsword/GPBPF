@@ -5,8 +5,7 @@ GPU-Powered bedrock pattern finder.
 A C/CUDA port of [this fork](https://github.com/benitez-tomas/bedrock-pattern-finder)
 of [this project](https://github.com/Developer-Mike/minecraft-bedrock-generator)
 I found on reddit, with some improvements and CUDA GPU acceleration (hence the
-"GPU-Powered"). Probably about ~1000x faster than the original after all of the 
-latest optimizations
+"GPU-Powered"). A web gui is comming soon
 
 It searches a rectangular area of a Minecraft world (1.18–1.21) for a bedrock
 pattern and prints every matching column. Output is **bit-exact** with the Java
@@ -59,15 +58,19 @@ make test     # runs ./fp_proof, then ./tools/verify.sh
 ```
 
 Runs the Java reference and `gpbpf` on identical inputs and diffs the match
-coordinates. 21 cases covering both probability bands, every band edge, the
+coordinates. 22 cases covering both probability bands, every band edge, the
 always-bedrock early returns, negative and past-wrap coordinates, extreme
-seeds, `pattern/*.txt` versus equivalent explicit block args, and output
-ordering. All 21 pass bit-exact on both the CPU and CUDA builds.
+seeds, `pattern/*.txt` versus equivalent explicit block args, output ordering,
+and the distance field at extreme coordinates. All 22 pass bit-exact on both
+the CPU and CUDA builds.
 
-The ordering case exists because the other 20 pipe both sides through `sort`
-before diffing, so they compare the match *set* and would not notice an
-ordering regression. It spans negative and positive coordinates, which is where
-a radix key without the signed bias would put the negatives last.
+Two cases exist to cover what the rest structurally cannot. The ordering case:
+every other case pipes both sides through `sort` before diffing, so they
+compare the match *set* and would not notice an ordering regression. It spans
+negative and positive coordinates, which is where a radix key without the
+signed bias would put the negatives last. The `hypot` case: every other case
+discards the distance field, so it is the only one comparing full output
+lines.
 
 The harness needs no maven: it copies the reference source to a temp dir and
 strips its two external dependencies so Java's multi-file source launcher can
@@ -143,6 +146,51 @@ integer multiplies in `bd_hash` gains 6%, and removing the 64-bit div/mod used
 to unflatten the thread index gains nothing at all — nvcc hoists the invariant
 reciprocal out of the loop, so it costs 3 instructions for the whole kernel.
 
+### Versus the original
+
+Measured against the real `bedrock_finder-1.1.0.jar` built from the Java
+sources (RTX 3070, 12-thread CPU, JVM 25). The original is single-threaded, so
+the 1-thread column separates the algorithmic win from the threading win. All
+runs produced identical match counts.
+
+| workload | Java | ours, 1 thread | ours, 12 threads | ours, CUDA |
+|----------|------|----------------|------------------|------------|
+| 3×3 plate, 100M columns | 3.62 s | 0.55 s (6.6×) | **0.06 s (60×)** | 0.32 s (11×) |
+| 20-block pattern, 50M columns | 5.42 s | 1.23 s (4.4×) | **0.15 s (36×)** | 0.35 s (16×) |
+| 1 block, 16M columns / 3.2M matches | 10.54 s | 0.23 s (46×) | **0.09 s (117×)** | 0.41 s (26×) |
+| 20-block pattern, 400M columns | ~43 s (extrapolated) | — | 1.16 s | **0.51 s** |
+
+Two things worth reading off this. **CUDA is not always the fastest option** —
+below roughly 100M columns its ~0.2 s context initialisation costs more than
+the whole search, and the 12-thread CPU path wins. It pulls ahead on large
+areas, which is the last row. **The original's weakest point is output**, not
+search: the 3.2M-match row is 10.5 s in Java, most of it printing.
+
+Reproducing, once `bedrock_finder-1.1.0.jar` is built (`mvn package` in the
+reference repo):
+
+```sh
+# 3x3 plate at y=-60. Args written out rather than built in a variable: zsh
+# does not word-split unquoted parameters, so a variable would arrive as one
+# argument (which gpbpf rejects, but only after wasting your time).
+time java -jar bedrock_finder-1.1.0.jar 12345 0 0 10000 10000 \
+  0,-60,0:1 0,-60,1:1 0,-60,2:1 \
+  1,-60,0:1 1,-60,1:1 1,-60,2:1 \
+  2,-60,0:1 2,-60,1:1 2,-60,2:1
+
+# ours, same arguments; prefix OMP_NUM_THREADS=1 for the single-thread column
+time ./gpbpf 12345 0 0 10000 10000 \
+  0,-60,0:1 0,-60,1:1 0,-60,2:1 \
+  1,-60,0:1 1,-60,1:1 1,-60,2:1 \
+  2,-60,0:1 2,-60,1:1 2,-60,2:1
+```
+
+On a machine with no `mvn`/`javac`, the jar can still be built: fetch Guava and
+JLine from Maven Central, compile through `javax.tools.ToolProvider` (the
+`jdk.compiler` module is present even when the `javac` binary is not) and zip
+the result, skipping the dependency `.SF`/`.DSA`/`.RSA` signatures and
+`module-info.class`. That is how these numbers were produced.
+
 ### Output path
 
 Once the kernel was fast, printing became the bottleneck. On a search emitting
@@ -176,7 +224,10 @@ with the formatting made that trade unnecessary.
 - Match output is buffered in memory before printing, so a search emitting
   hundreds of millions of matches needs proportional RAM. Degenerate patterns
   are the ones that do this; the CUDA path caps and reports instead.
-- `(int)hypot(x,z)` in the "blocks from origin" field may differ from Java's
-  `Math.hypot` in the last ulp. Cosmetic; the harness diffs coordinates.
+- The "blocks from origin" field may differ from Java's `Math.hypot` in the
+  last ulp for some coordinates. Cosmetic, and the harness diffs coordinates
+  rather than distances except in the saturation case. Saturation itself is
+  handled: Java's `(int)` narrowing clamps to `Integer.MAX_VALUE` while C's is
+  undefined once the value exceeds `INT_MAX`, so `hypot_i` clamps to match.
 - A missing `pattern/` directory leaves the pattern empty, which matches every
   column. This is the reference's behaviour, preserved deliberately.

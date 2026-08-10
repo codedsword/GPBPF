@@ -145,6 +145,25 @@ else
 	diff <(printf '%s\n' "$oj") <(printf '%s\n' "$oc") | head -10 | sed 's/^/        /'
 fi
 
+# The distance field at extreme coordinates. hypot there exceeds INT_MAX, where
+# Java's (int) narrowing saturates to Integer.MAX_VALUE (JLS 5.1.3) and C's is
+# undefined. Compares FULL lines, unlike every case above, because the distance
+# is the thing under test rather than incidental.
+full() { grep -o '@-\?[0-9]\+;-\?[0-9]\+ ([0-9]\+ blocks from origin)'; }
+XARGS="12345 2147483600 2147483600 2147483610 2147483610 0,-60,0:1"
+ej=$( (cd "$WORK" && java src/main/java/com/mike/Main.java $XARGS) 2>/dev/null | full)
+ec=$( (cd "$WORK" && "$BIN" $XARGS) 2>/dev/null | full)
+if [ -n "$ej" ] && [ "$ej" = "$ec" ]; then
+	pass=$((pass + 1))
+	printf '  ok    %-42s (%s matches, distance saturated)\n' "hypot clamp at INT_MAX" \
+		"$(printf '%s' "$ej" | grep -c . || true)"
+else
+	fail=$((fail + 1))
+	printf '  FAIL  %s\n' "hypot clamp at INT_MAX"
+	[ -n "$ej" ] || printf '        reference produced no matches -- test would be vacuous\n'
+	diff <(printf '%s\n' "$ej") <(printf '%s\n' "$ec") | head -10 | sed 's/^/        /'
+fi
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
