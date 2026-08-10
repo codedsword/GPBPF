@@ -5,7 +5,8 @@ GPU-Powered bedrock pattern finder.
 A C/CUDA port of [this fork](https://github.com/benitez-tomas/bedrock-pattern-finder)
 of [this project](https://github.com/Developer-Mike/minecraft-bedrock-generator)
 I found on reddit, with some improvements and CUDA GPU acceleration (hence the
-"GPU-Powered").
+"GPU-Powered"). Probably about ~1000x faster than the original after all of the 
+latest optimizations
 
 It searches a rectangular area of a Minecraft world (1.18–1.21) for a bedrock
 pattern and prints every matching column. Output is **bit-exact** with the Java
@@ -58,10 +59,15 @@ make test     # runs ./fp_proof, then ./tools/verify.sh
 ```
 
 Runs the Java reference and `gpbpf` on identical inputs and diffs the match
-coordinates. 20 cases covering both probability bands, every band edge, the
+coordinates. 21 cases covering both probability bands, every band edge, the
 always-bedrock early returns, negative and past-wrap coordinates, extreme
-seeds, and `pattern/*.txt` versus equivalent explicit block args. All 20 pass
-bit-exact on both the CPU and CUDA builds.
+seeds, `pattern/*.txt` versus equivalent explicit block args, and output
+ordering. All 21 pass bit-exact on both the CPU and CUDA builds.
+
+The ordering case exists because the other 20 pipe both sides through `sort`
+before diffing, so they compare the match *set* and would not notice an
+ordering regression. It spans negative and positive coordinates, which is where
+a radix key without the signed bias would put the negatives last.
 
 The harness needs no maven: it copies the reference source to a temp dir and
 strips its two external dependencies so Java's multi-file source launcher can
@@ -137,14 +143,39 @@ integer multiplies in `bd_hash` gains 6%, and removing the 64-bit div/mod used
 to unflatten the thread index gains nothing at all — nvcc hoists the invariant
 reciprocal out of the loop, so it costs 3 instructions for the whole kernel.
 
+### Output path
+
+Once the kernel was fast, printing became the bottleneck. On a search emitting
+4.6M matches (178 MB of text), end-to-end wall clock is **1.13 s → 0.42 s**:
+
+| phase | before | after |
+|-------|--------|-------|
+| sort | 406 ms | **84 ms** |
+| format + write | 408 ms | **17 ms** |
+
+The sort is an LSD radix sort, 4 passes of 16 bits over `(x,z)` packed into one
+key, replacing `qsort`'s indirect comparator. The `^0x80000000` bias makes
+signed ordering agree with unsigned ordering.
+
+Formatting improved in two steps: replacing `printf` (~85 ns per call) with
+hand-written integer formatting took it to 129 ms, and spreading it across the
+OpenMP team took it to 17 ms. Threads fill their own slice of one pool and the
+wave is written back in thread order, so no thread touches stdout, there is no
+locking, and output order is unchanged. Output is byte-identical whether run on
+one thread or twelve.
+
+`hypot` is deliberately left alone: `sqrt(x*x + z*z)` would be faster but could
+change the displayed distance for large coordinates. Parallelising it along
+with the formatting made that trade unnecessary.
+
 ## Known limits
 
 - The CUDA path caps the pattern at 2048 blocks (64 KB constant memory) and the
   match buffer at 2²⁴ entries. Both are detected and reported, never silently
   truncated.
-- On searches that emit millions of matches, output — not the kernel — is the
-  bottleneck: 4.6M matches cost ~0.9 s to sort and print against a 51 ms
-  kernel.
+- Match output is buffered in memory before printing, so a search emitting
+  hundreds of millions of matches needs proportional RAM. Degenerate patterns
+  are the ones that do this; the CUDA path caps and reports instead.
 - `(int)hypot(x,z)` in the "blocks from origin" field may differ from Java's
   `Math.hypot` in the last ulp. Cosmetic; the harness diffs coordinates.
 - A missing `pattern/` directory leaves the pattern empty, which matches every

@@ -128,6 +128,23 @@ else
 	diff <(printf '%s\n' "$pj") <(printf '%s\n' "$pc") | head -10 | sed 's/^/        /'
 fi
 
+# Output ORDER, not just the set. coords() sorts before comparing, so an
+# ordering regression in sort_matches would otherwise pass unnoticed. Spans
+# negative and positive coordinates: that is where a radix key without the
+# signed bias would put the negatives last.
+raw() { grep -o '@-\?[0-9]\+;-\?[0-9]\+'; }
+oj=$( (cd "$WORK" && java src/main/java/com/mike/Main.java 12345 -300 -300 300 300 "0,-60,0:1" "1,-60,0:1") 2>/dev/null | raw)
+oc=$( (cd "$WORK" && "$BIN" 12345 -300 -300 300 300 "0,-60,0:1" "1,-60,0:1") 2>/dev/null | raw)
+if [ "$oj" = "$oc" ]; then
+	pass=$((pass + 1))
+	printf '  ok    %-42s (%s matches, in order)\n' "output order x-major z-minor" \
+		"$(printf '%s' "$oj" | grep -c . || true)"
+else
+	fail=$((fail + 1))
+	printf '  FAIL  %s\n' "output order x-major z-minor"
+	diff <(printf '%s\n' "$oj") <(printf '%s\n' "$oc") | head -10 | sed 's/^/        /'
+fi
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
