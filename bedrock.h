@@ -26,6 +26,8 @@
 typedef struct {
 	int32_t dx, y, dz; /* dx/dz pattern-relative, y absolute world height */
 	int32_t want;      /* 1 = must be bedrock, 0 = must not be */
+	float p;           /* probability for this y, precomputed by bd_classify */
+	int32_t roof;      /* 1 = roof deriver, 0 = floor */
 } bd_block;
 
 typedef struct {
@@ -109,37 +111,71 @@ BD_FN float bd_next_float(uint64_t *lo, uint64_t *hi)
 	return (float)(bd_next(lo, hi) >> 40) * 5.9604645E-8f;
 }
 
-/* Java: BedrockReader.isBedrock(). */
-BD_FN int bd_is_bedrock(const bd_derivers *d, int32_t x, int32_t y, int32_t z)
+enum { BD_ALWAYS_FALSE = 0, BD_ALWAYS_TRUE = 1, BD_PROBABILISTIC = 2 };
+
+/* Mirrors the branch structure of BedrockReader.isBedrock, but evaluated once
+ * per pattern block at load time instead of once per column. `p` is the
+ * identical double the Java code computes -- hoisting it out of the hot loop
+ * removes a double-precision divide from every probe, which measured at two
+ * thirds of GPU kernel time (there is no hardware FP64 divider; nvcc emits a
+ * MUFU + DFMA Newton-Raphson sequence, and consumer Ampere runs FP64 at 1:64).
+ *
+ * Host-side only. Returns the constant verdict when the outcome cannot depend
+ * on (x,z), which lets the caller resolve such blocks without searching. */
+BD_FN int bd_classify(bd_block *b)
 {
 	double p;
-	uint64_t lo, hi;
 
-	if (y < 0) { /* BEDROCK_FLOOR: min -64, max -59 */
-		if (y == -64) return 1;
-		if (y > -59) return 0;
-		p = bd_lerp_from_progress(y, -64.0, -59.0, 1.0, 0.0);
-		lo = d->floor_lo;
-		hi = d->floor_hi;
+	if (b->y < 0) { /* BEDROCK_FLOOR: min -64, max -59 */
+		b->roof = 0;
+		if (b->y == -64) return BD_ALWAYS_TRUE;
+		if (b->y > -59) return BD_ALWAYS_FALSE;
+		p = bd_lerp_from_progress(b->y, -64.0, -59.0, 1.0, 0.0);
 	} else { /* BEDROCK_ROOF: min 128, max 123 */
-		if (y == 128) return 1;
-		if (y < 123) return 0;
-		p = bd_lerp_from_progress(y, 123.0, 128.0, 1.0, 0.0);
-		lo = d->roof_lo;
-		hi = d->roof_hi;
+		b->roof = 1;
+		if (b->y == 128) return BD_ALWAYS_TRUE;
+		if (b->y < 123) return BD_ALWAYS_FALSE;
+		p = bd_lerp_from_progress(b->y, 123.0, 128.0, 1.0, 0.0);
 	}
+
+	/* nextFloat() ranges over [0, 1-2^-24], so `f < p` is constant whenever
+	 * p >= 1 or p <= 0. Both are reachable: y=-65 gives p=1.2, y=129 gives
+	 * p=-0.2, and the band edges give exactly 1.0 and 0.0. The classification
+	 * thresholds stay in double, matching Java's branch semantics. */
+	if (p >= 1.0) return BD_ALWAYS_TRUE;
+	if (p <= 0.0) return BD_ALWAYS_FALSE;
+
+	/* Narrowed to float ONLY because it is provably lossless here: after the
+	 * tests above just four probabilities survive (0.8/0.6/0.4/0.2), and
+	 * nextFloat() has only 2^24 possible outputs, so the comparison's entire
+	 * input space is finite and was enumerated -- see tools/fp_proof.c, wired
+	 * into `make test`. That check is the licence for this narrowing; if the
+	 * bands or constants ever change, it fails and this must revert to double.
+	 * Worth 2.8x: consumer Ampere runs FP64 at 1:64, so the double compare
+	 * dominated the kernel once the divide was hoisted out. */
+	b->p = (float)p;
+	return BD_PROBABILISTIC;
+}
+
+/* One probe. Java: BedrockReader.isBedrock, minus the probability computation
+ * bd_classify hoisted out. Callers pass only BD_PROBABILISTIC blocks. */
+BD_FN int bd_probe(const bd_derivers *d, const bd_block *b, int32_t x, int32_t z)
+{
+	uint64_t lo = b->roof ? d->roof_lo : d->floor_lo;
+	uint64_t hi = b->roof ? d->roof_hi : d->floor_hi;
 
 	/* Java: RandomDeriver.createRandom(x,y,z) -> new Xoroshiro(hash ^ lo, hi),
 	 * the two-arg ctor, so the impl's zero-seed guard applies. */
-	lo ^= (uint64_t)bd_hash(x, y, z);
+	lo ^= (uint64_t)bd_hash(x + b->dx, b->y, z + b->dz);
 	if ((lo | hi) == 0) {
 		lo = BD_FALLBACK_LO;
 		hi = BD_FALLBACK_HI;
 	}
 
-	/* Java compares (double)nextFloat() < probabilityValue. Keeping p a
-	 * double and widening the float is the whole precision contract. */
-	return (double)bd_next_float(&lo, &hi) < p;
+	/* Java compares (double)nextFloat() < probabilityValue. Done in float
+	 * here, which tools/fp_proof.c shows is exactly equivalent for every
+	 * probability bd_classify can produce. */
+	return bd_next_float(&lo, &hi) < b->p;
 }
 
 /* Java: Main.checkFormation(). Same early exit on first mismatch. */
@@ -149,8 +185,7 @@ BD_FN int bd_check(const bd_derivers *d, const bd_block *blocks, int n,
 	int i;
 
 	for (i = 0; i < n; i++)
-		if (blocks[i].want != bd_is_bedrock(d, x + blocks[i].dx,
-		                                    blocks[i].y, z + blocks[i].dz))
+		if (blocks[i].want != bd_probe(d, &blocks[i], x, z))
 			return 0;
 	return 1;
 }

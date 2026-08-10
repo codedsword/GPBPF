@@ -48,7 +48,30 @@ static void add_block(int32_t dx, int32_t y, int32_t dz, int32_t want)
 	blocks[nblocks].y = y;
 	blocks[nblocks].dz = dz;
 	blocks[nblocks].want = want;
+	blocks[nblocks].p = 0.0f;
+	blocks[nblocks].roof = 0;
+	
 	nblocks++;
+}
+
+/* Resolve every block whose outcome cannot depend on (x,z): one that
+ * contradicts `want` makes the whole search provably empty, one that agrees is
+ * redundant and is dropped. Leaves only probabilistic blocks, each carrying a
+ * precomputed probability. Returns 0 if the search cannot match anything. */
+static int prefilter(void)
+{
+	int i, n = 0;
+
+	for (i = 0; i < nblocks; i++) {
+		int kind = bd_classify(&blocks[i]);
+
+		if (kind == BD_PROBABILISTIC)
+			blocks[n++] = blocks[i];
+		else if (blocks[i].want != (kind == BD_ALWAYS_TRUE))
+			return 0;
+	}
+	nblocks = n;
+	return 1;
 }
 
 void bd_add_match(int32_t x, int32_t z)
@@ -82,6 +105,10 @@ static void parse_block_arg(const char *arg)
 			p++;
 		}
 	}
+	/* Java's BedrockBlock throws NumberFormatException on trailing junk
+	 * (Integer.parseInt of the whole post-colon field); reject it here too. */
+	if (*p)
+		die("bad block argument (want X,Y,Z:B)");
 	add_block((int32_t)v[0], (int32_t)v[1], (int32_t)v[2], v[3] == 1);
 }
 
@@ -269,6 +296,11 @@ int main(int argc, char **argv)
 
 	derive((uint64_t)seed, "minecraft:bedrock_floor", &d.floor_lo, &d.floor_hi);
 	derive((uint64_t)seed, "minecraft:bedrock_roof", &d.roof_lo, &d.roof_hi);
+
+	if (!prefilter()) {
+		printf("search finished\n"); /* a constant block contradicts the pattern */
+		return 0;
+	}
 
 #ifdef USE_CUDA
 	if (gpu_search(&d, blocks, nblocks, xf, zf, xt, zt) != 0) {

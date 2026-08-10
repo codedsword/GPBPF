@@ -49,8 +49,14 @@ cuda: main.c search.cu bedrock.h
 	$(CC) $(CFLAGS) $(PARITY) -fopenmp -DUSE_CUDA -c main.c -o main.o
 	$(NVCC) $(NVCC_COMPAT) -o gpbpf main.o search.o $(LDLIBS) -Xcompiler -fopenmp
 
-test: gpbpf
+test: gpbpf fp_proof
+	./fp_proof
 	./tools/verify.sh
 
+# Exhaustive check licensing the float narrowing in bd_classify. Must pass
+# before the parity harness is meaningful.
+fp_proof: tools/fp_proof.c bedrock.h
+	$(CC) $(CFLAGS) $(PARITY) -o $@ tools/fp_proof.c -lm
+
 clean:
-	rm -f gpbpf main.o search.o
+	rm -f gpbpf fp_proof main.o search.o

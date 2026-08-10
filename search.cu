@@ -6,9 +6,9 @@
 
 #include "bedrock.h"
 
-/* 64 KB of constant memory / 16 B per block. Every thread in a warp reads the
- * same entry in lockstep, so constant memory broadcasts instead of gathering. */
-#define MAX_PATTERN 4096
+/* Fits in the 64 KB constant bank (24 B per block). Every thread in a warp
+ * reads the same entry in lockstep, so this broadcasts instead of gathering. */
+#define MAX_PATTERN 2048
 
 /* ponytail: fixed match buffer, the kernel cannot realloc. Overflow is
  * detected and reported rather than silently truncated; raise the cap or run

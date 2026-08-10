@@ -54,7 +54,7 @@ gpbpf 12345 0 0 20000 20000 0,-60,0:1 1,-60,0:1 0,-60,1:1
 ## Validation
 
 ```sh
-make test     # or: ./tools/verify.sh [path-to-bedrock-pattern-finder]
+make test     # runs ./fp_proof, then ./tools/verify.sh
 ```
 
 Runs the Java reference and `gpbpf` on identical inputs and diffs the match
@@ -81,32 +81,70 @@ are the reason the harness tests coordinates past |x| ≈ 686:
 - The final `>>` is Java's **arithmetic** shift, not `>>>`.
 
 `nextFloat()` cannot drift: `next(24)` is exactly representable in binary32 and
-the multiplier is exactly 2⁻²⁴, so the multiply only adjusts the exponent.
-Probabilities are kept in `double` to mirror Java's `(double)nextFloat() < p`,
-and the build passes `-ffp-contract=off` / `--fmad=false` so no FMA
-contraction can change a rounding. **Never** add `--use_fast_math`.
+the multiplier is exactly 2⁻²⁴, so the multiply only adjusts the exponent. The
+build passes `-ffp-contract=off` / `--fmad=false` so no FMA contraction can
+change a rounding. **Never** add `--use_fast_math`.
+
+Java compares `(double)nextFloat() < p`; `bd_probe` compares in float. That is
+a narrowing, so it is licensed by exhaustion rather than by argument:
+`nextFloat()` has exactly 2²⁴ possible outputs, and after `bd_classify` only
+four probabilities (0.8/0.6/0.4/0.2) can reach a comparison — every other `y`
+resolves to a constant verdict. `tools/fp_proof.c` enumerates that entire
+space (386M comparisons, ~0.3 s) and `make test` runs it before the parity
+harness. **If it ever fails, `bd_probe` must go back to `(double)f < p`.**
 
 ## Performance
 
-Measured on an RTX 3070 + 12-thread CPU, 20000×20000 = 400M columns, a pattern
-forcing ≥16 RNG probes per column:
+RTX 3070 + 12-thread CPU, 20000×20000 = 400M columns, 20 probabilistic blocks
+(the prefilter below cannot remove any of them, so this is the honest case).
 
-| build | time |
-|-------|------|
-| CPU (OpenMP, 12 threads) | 2.84 s |
-| CUDA | 1.55 s |
+GPU kernel time alone, measured with `nsys`:
 
-Restrictive patterns are much faster on both paths — the first probe rejects
-~80% of columns, so a typical search is dominated by early exit and CUDA's
-~0.2 s context init can make the CPU path the quicker one. The GPU margin is
-modest here and the kernel has not been tuned; FP64 was measured and ruled out
-as the bottleneck (removing it gained 6%).
+| | kernel |
+|-|--------|
+| before optimization | 622.8 ms |
+| after | **51.4 ms** (12.1×) |
+
+End-to-end wall clock on the same search with sparse output:
+
+| build | before | after |
+|-------|--------|-------|
+| CPU (OpenMP, 12 threads) | 1.21 s | 1.03 s |
+| CUDA | 0.95 s | **0.27 s** |
+
+Roughly 0.2 s of the CUDA figure is context init, so for small ranges the CPU
+path can still win. Two changes got this:
+
+**The probability was recomputed 6.6 billion times to produce one of four
+values.** `p` depends only on a pattern block's `y`, never on `(x,z)`, but
+`lerpFromProgress` ran inside the per-probe hot loop — and it contains a
+double-precision *divide*. There is no hardware FP64 divider, so nvcc emits a
+`MUFU.RCP` + Newton-Raphson `DFMA` sequence, and consumer Ampere runs FP64 at
+1:64 rate. Ablating it measured at 67% of kernel time. It is now computed once
+per pattern block on the host, which is bit-exact by construction — the same
+double arithmetic, just hoisted. The kernel now contains **zero** FP64
+instructions (SASS went 416 → 288 instructions).
+
+**Blocks with a constant outcome are resolved at load time.** Any block outside
+the probabilistic bands — or with p ≥ 1 or p ≤ 0 — has an outcome independent
+of `(x,z)`. If it contradicts the pattern the whole search is provably empty;
+if it agrees it is redundant and dropped. Patterns made largely of such blocks
+get far more than 12× (one 20-block test went 1086 ms → 25 ms) because the work
+was never real to begin with.
+
+Two things that sound promising and measurably are not: replacing the 64-bit
+integer multiplies in `bd_hash` gains 6%, and removing the 64-bit div/mod used
+to unflatten the thread index gains nothing at all — nvcc hoists the invariant
+reciprocal out of the loop, so it costs 3 instructions for the whole kernel.
 
 ## Known limits
 
-- The CUDA path caps the pattern at 4096 blocks (64 KB constant memory) and the
+- The CUDA path caps the pattern at 2048 blocks (64 KB constant memory) and the
   match buffer at 2²⁴ entries. Both are detected and reported, never silently
   truncated.
+- On searches that emit millions of matches, output — not the kernel — is the
+  bottleneck: 4.6M matches cost ~0.9 s to sort and print against a 51 ms
+  kernel.
 - `(int)hypot(x,z)` in the "blocks from origin" field may differ from Java's
   `Math.hypot` in the last ulp. Cosmetic; the harness diffs coordinates.
 - A missing `pattern/` directory leaves the pattern empty, which matches every

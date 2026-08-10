@@ -56,3 +56,4 @@ dkms.conf
 
 # build output
 /gpbpf
+/fp_proof
