@@ -18,76 +18,113 @@
 	--rock:    #8d8d99;
 }
 * { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; }
+
+/* ONE fluid unit drives the whole layout. Browser zoom does not change px sizes
+ * -- it shrinks the viewport measured in CSS px -- so a px-sized UI overflows as
+ * you zoom in. Sizing the root off vh (with a small vw term so a wide, short
+ * window does not go tiny) makes the interface shrink to fit instead, and every
+ * length below is rem/em so it all follows. Reference: ~13px at a 950px-tall
+ * viewport, which is a maximised browser on a 1080p screen. */
+html {
+	font-size: clamp(9px, calc(0.8px + 1.2vh + 0.06vw), 15px);
+	height: 100%;
+	margin: 0;
+}
 body {
+	margin: 0; height: 100%;
 	background: var(--bg);
 	color: var(--text);
-	font: 13px/1.5 ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+	font: 1rem/1.5 ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
 	display: flex;
 	flex-direction: column;
 }
-h1 { font-size: 15px; margin: 0; letter-spacing: .14em; text-transform: uppercase; }
+/* Borders stay in px on purpose: they already scale with zoom, and fractional
+ * em borders render blurry at the 1px hairlines this UI is built from. */
+h1 { font-size: 1.15rem; margin: 0; letter-spacing: .14em; text-transform: uppercase; }
 h2 {
-	font-size: 11px; margin: 0 0 8px; letter-spacing: .16em;
+	font-size: .85rem; margin: 0 0 .45rem; letter-spacing: .16em;
 	text-transform: uppercase; color: var(--dim); font-weight: 600;
 }
 a { color: var(--accent); }
 code, .mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; }
 
-/* blocky bevelled chrome, the one bit of Minecraft styling that earns its keep */
-.bevel { border: 2px solid; border-color: var(--hi) var(--lo) var(--lo) var(--hi); }
-
 header {
-	display: flex; align-items: center; gap: 14px;
-	padding: 10px 16px; background: var(--panel);
+	display: flex; align-items: center; gap: 1rem;
+	padding: .55rem 1.2rem; background: var(--panel);
 	border-bottom: 2px solid var(--lo);
 }
-header .sub { color: var(--dim); font-size: 12px; }
+header .sub { color: var(--dim); font-size: .92rem; }
 header .spacer { flex: 1; }
 
 main {
-	flex: 1; display: grid; grid-template-columns: 340px 1fr;
-	gap: 12px; padding: 12px; overflow: hidden;
+	flex: 1; display: grid; grid-template-columns: 26rem 1fr;
+	gap: .75rem; padding: .75rem; overflow: hidden; min-height: 0;
 }
 @media (max-width: 900px) { main { grid-template-columns: 1fr; overflow: auto; } }
 
-.col { display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow-y: auto; }
-.card { background: var(--panel); padding: 12px; border: 1px solid var(--edge); }
+.col { display: flex; flex-direction: column; gap: .75rem; min-height: 0; overflow-y: auto; }
+.card { background: var(--panel); padding: .75rem .9rem; border: 1px solid var(--edge); }
+/* the viewer card takes whatever height is left rather than a fixed 384px */
+.card.grow { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 
-label { display: block; font-size: 11px; color: var(--dim); margin-bottom: 3px; }
+label { display: block; font-size: .85rem; color: var(--dim); margin-bottom: .2rem; }
+
+/* Inline label + input on one line. Stacking the label above cost ~17px a row,
+ * and the left column has enough rows for that to force a scrollbar. The first
+ * label is fixed-width so inputs line up down the card. */
+.field { display: flex; align-items: center; gap: .45rem; margin-top: .45rem; }
+.field > label { margin: 0; flex: 0 0 auto; }
+.field > label:first-child { flex: 0 0 3.4rem; }
+.field input { flex: 1; min-width: 0; }
+.sep { color: var(--dim); }
+.hint { font-size: .85rem; color: var(--dim); margin-top: .3rem; }
+.hint:empty { display: none; }
 input[type=text], input[type=number] {
 	background: var(--sunk); color: var(--text); width: 100%;
 	border: 2px solid; border-color: var(--lo) var(--hi) var(--hi) var(--lo);
-	padding: 5px 7px; font: inherit; font-family: ui-monospace, monospace;
+	padding: .3rem .55rem; font: inherit; font-family: ui-monospace, monospace;
 }
 input:focus { outline: 1px solid var(--accent); outline-offset: 1px; }
-.row { display: flex; gap: 8px; }
+.row { display: flex; gap: .6rem; }
 .row > * { flex: 1; min-width: 0; }
 
 button {
 	background: var(--panel); color: var(--text); font: inherit; cursor: pointer;
-	padding: 5px 10px;
+	padding: .35rem .8rem;
 	border: 2px solid; border-color: var(--hi) var(--lo) var(--lo) var(--hi);
 }
 button:hover { background: #23232d; }
 button:active { border-color: var(--lo) var(--hi) var(--hi) var(--lo); }
 button.go {
-	width: 100%; padding: 11px; margin-top: 10px; font-weight: 700;
+	width: 100%; padding: .7rem; margin-top: .6rem; font-weight: 700;
 	letter-spacing: .18em; text-transform: uppercase;
 	background: #33501f; color: #d9f0c8; border-color: #5f8b45 #16240c #16240c #5f8b45;
 }
 button.go:hover { background: #3d5f26; }
 button.go:disabled { background: #22222a; color: var(--dim); border-color: var(--edge); cursor: not-allowed; }
-button.sm { padding: 2px 7px; font-size: 11px; }
+button.sm { padding: .15rem .5rem; font-size: .85rem; }
 
-.tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; }
+/* layer tabs and the size controls share one line, and wrap onto two only when
+ * there are enough layers to need it */
+.toolrow { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem; margin-bottom: .6rem; }
+.tabs { display: flex; flex-wrap: wrap; gap: .3rem; flex: 1 1 auto; }
+.sizebar { display: flex; align-items: center; gap: .3rem; margin-left: auto; }
+.sizebar input { width: 2.9rem; padding: .1rem .2rem; font-size: .85rem; text-align: center; }
 .tab { font-family: ui-monospace, monospace; }
 .tab.on { background: #2c3a22; border-color: var(--accent) var(--lo) var(--lo) var(--accent); }
 
-/* pattern grid ---------------------------------------------------------- */
-#grid { display: grid; gap: 2px; user-select: none; touch-action: none; width: max-content; }
+/* pattern grid ----------------------------------------------------------
+ * Fractional columns plus aspect-ratio: cells fill the card width and stay
+ * square, so a 16-wide pattern gets small cells automatically instead of
+ * needing size breakpoints. max-width stops a 1x1 grid becoming one huge cell. */
+#grid {
+	display: grid; gap: .12em; user-select: none; touch-action: none;
+	grid-template-columns: repeat(var(--cols, 5), 1fr);
+	max-width: min(calc(var(--cols, 5) * 2.1em),
+	                calc(var(--cols, 5) / var(--rows, 5) * 17rem));
+}
 .cell {
-	width: 26px; height: 26px; padding: 0; background: #1f1f28;
+	aspect-ratio: 1; min-width: 0; padding: 0; background: #1f1f28;
 	border: 1px solid #2b2b36; position: relative;
 }
 .cell::after {
@@ -102,68 +139,78 @@ button.sm { padding: 2px 7px; font-size: 11px; }
 	content: ""; inset: 0; border-radius: 0; background: none;
 	background-image: linear-gradient(45deg, transparent 44%, var(--bad) 44%, var(--bad) 56%, transparent 56%);
 }
-.axis { color: var(--dim); font-size: 10px; display: flex; justify-content: space-between; }
+.axis { color: var(--dim); font-size: .78rem; display: flex; justify-content: space-between; }
 
-.legend { display: flex; gap: 14px; font-size: 11px; color: var(--dim); margin-top: 8px; }
+.legend { display: flex; flex-wrap: wrap; gap: .3rem .8rem; font-size: .85rem; color: var(--dim); margin-top: .5rem; }
 /* swatches keep .cell's position:relative -- its ::after is absolute, and a
  * static parent would let inset:0 resolve against the page instead */
-.legend i { width: 13px; height: 13px; display: inline-block; vertical-align: -2px; margin-right: 5px; }
+.legend i {
+	width: 1rem; height: 1rem; aspect-ratio: auto;
+	display: inline-block; vertical-align: -.15rem; margin-right: .35rem;
+}
 kbd {
-	font: 10px ui-monospace, monospace; color: var(--text); background: #26262f;
+	font: .78rem ui-monospace, monospace; color: var(--text); background: #26262f;
 	border: 1px solid var(--edge); border-bottom-width: 2px; border-radius: 2px;
-	padding: 0 4px; margin-left: 2px;
+	padding: 0 .3rem; margin-left: .15rem;
 }
 
-.est { margin-top: 10px; padding: 8px; background: var(--sunk); border-left: 3px solid var(--accent); }
+.est { margin-top: .6rem; padding: .5rem .6rem; background: var(--sunk); border-left: 3px solid var(--accent); }
 .est.warn { border-color: var(--warn); }
 .est.bad  { border-color: var(--bad); }
-.est b { font-size: 15px; font-family: ui-monospace, monospace; }
-.est .why { color: var(--dim); font-size: 11px; }
+.est b { font-size: 1.15rem; font-family: ui-monospace, monospace; }
+.est .why { color: var(--dim); font-size: .85rem; }
 
 /* layer picker ---------------------------------------------------------- */
-#picker { display: none; margin-top: 8px; padding: 10px; background: var(--sunk); border: 1px solid var(--edge); }
+#picker { display: none; margin-top: .6rem; padding: .75rem; background: var(--sunk); border: 1px solid var(--edge); }
 #picker.open { display: block; }
-.plist { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.plist button { display: block; width: 100%; text-align: left; margin-bottom: 3px; font-family: ui-monospace, monospace; }
+.plist { display: grid; grid-template-columns: 1fr 1fr; gap: .9rem; }
+.plist button { display: block; width: 100%; text-align: left; margin-bottom: .2rem; font-family: ui-monospace, monospace; }
 .plist small { color: var(--dim); float: right; }
-.note { font-size: 11px; color: var(--warn); margin-top: 8px; }
+.note { font-size: .85rem; color: var(--warn); margin-top: .6rem; }
 
 /* results --------------------------------------------------------------- */
-.stat { display: flex; gap: 18px; align-items: baseline; margin-bottom: 8px; flex-wrap: wrap; }
-.stat b { font-size: 20px; font-family: ui-monospace, monospace; }
-.stat span { color: var(--dim); font-size: 12px; }
-.banner { padding: 7px 9px; margin-bottom: 8px; background: #2e2413; border-left: 3px solid var(--warn); font-size: 12px; }
+.stat { display: flex; gap: 1.3rem; align-items: baseline; margin-bottom: .6rem; flex-wrap: wrap; }
+.stat b { font-size: 1.5rem; font-family: ui-monospace, monospace; }
+.stat span { color: var(--dim); font-size: .92rem; }
+.banner { padding: .5rem .7rem; margin-bottom: .6rem; background: #2e2413; border-left: 3px solid var(--warn); font-size: .92rem; }
 .banner.bad { background: #2e1614; border-color: var(--bad); }
 
-#scatter { width: 100%; height: 130px; display: block; background: var(--sunk); border: 1px solid var(--edge); cursor: crosshair; }
-.tablewrap { overflow: auto; max-height: 260px; border: 1px solid var(--edge); background: var(--sunk); }
-table { width: 100%; border-collapse: collapse; font-family: ui-monospace, monospace; font-size: 12px; }
+#scatter { width: 100%; height: 9rem; display: block; background: var(--sunk); border: 1px solid var(--edge); cursor: crosshair; }
+.tablewrap { overflow: auto; max-height: 20rem; border: 1px solid var(--edge); background: var(--sunk); }
+table { width: 100%; border-collapse: collapse; font-family: ui-monospace, monospace; font-size: .92rem; }
 th {
-	text-align: right; color: var(--dim); font-weight: 600; font-size: 10px;
+	text-align: right; color: var(--dim); font-weight: 600; font-size: .78rem;
 	letter-spacing: .1em; text-transform: uppercase;
-	padding: 5px 9px; position: sticky; top: 0; background: #202029;
+	padding: .35rem .7rem; position: sticky; top: 0; background: #202029;
 }
-td { text-align: right; padding: 3px 9px; border-top: 1px solid #23232c; }
+td { text-align: right; padding: .2rem .7rem; border-top: 1px solid #23232c; }
 tbody tr { cursor: pointer; }
 tbody tr:hover { background: #23232d; }
 tbody tr.on { background: #2c3a22; }
 
 /* viewer ---------------------------------------------------------------- */
-.viewwrap { position: relative; background: #0b0b0e; border: 1px solid var(--edge); }
-#view { display: block; width: 100%; height: 384px; cursor: grab; image-rendering: pixelated; }
-#view.drag { cursor: grabbing; }
-.viewbar { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; font-size: 12px; }
-.viewbar .at { color: var(--dim); font-family: ui-monospace, monospace; }
-
-footer { padding: 10px 16px; background: var(--panel); border-top: 2px solid var(--lo); }
-#cli {
-	display: block; background: var(--sunk); padding: 8px 10px; overflow-x: auto;
-	white-space: pre; font-size: 12px; color: #9fb98d; border: 1px solid var(--edge);
+.viewwrap {
+	position: relative; flex: 1 1 auto; min-height: 8rem;
+	background: #0b0b0e; border: 1px solid var(--edge);
 }
-details { margin-top: 8px; font-size: 12px; }
+#view { display: block; width: 100%; height: 100%; cursor: grab; image-rendering: pixelated; }
+#view.drag { cursor: grabbing; }
+.viewbar { display: flex; gap: .6rem; align-items: center; margin-top: .6rem; flex-wrap: wrap; font-size: .92rem; }
+.viewbar .at { color: var(--dim); font-family: ui-monospace, monospace; }
+.viewbar select {
+	background: var(--sunk); color: var(--text); font: inherit;
+	border: 1px solid var(--edge); padding: .15rem;
+}
+
+footer { padding: .55rem 1.2rem; background: var(--panel); border-top: 2px solid var(--lo); }
+#cli {
+	display: block; background: var(--sunk); padding: .55rem .75rem; overflow-x: auto;
+	white-space: pre; font-size: .92rem; color: #9fb98d; border: 1px solid var(--edge);
+}
+details { margin-top: .5rem; font-size: .92rem; }
 summary { cursor: pointer; color: var(--dim); }
-details pre { background: var(--sunk); padding: 8px; overflow: auto; border: 1px solid var(--edge); }
-.flexbar { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
+details pre { background: var(--sunk); padding: .55rem; overflow: auto; border: 1px solid var(--edge); }
+.flexbar { display: flex; gap: .6rem; align-items: center; margin-bottom: .45rem; }
 .flexbar .spacer { flex: 1; }
 .hide { display: none; }
 </style>
@@ -179,35 +226,45 @@ details pre { background: var(--sunk); padding: 8px; overflow: auto; border: 1px
 <div class="col">
 
 	<div class="card">
-		<h2>World</h2>
-		<label for="seed">Seed</label>
-		<input type="text" id="seed" value="12345" spellcheck="false">
-		<div class="est" style="border-color:var(--edge);margin-top:6px;padding:5px 8px">
-			<span class="why mono" id="seedout"></span>
+		<h2>World &amp; area</h2>
+		<div class="field">
+			<label for="seed">Seed</label>
+			<input type="text" id="seed" value="12345" spellcheck="false">
 		</div>
-	</div>
-
-	<div class="card">
-		<h2>Search area</h2>
-		<div class="row">
-			<div><label for="cx">Centre X</label><input type="number" id="cx" value="0"></div>
-			<div><label for="cz">Centre Z</label><input type="number" id="cz" value="0"></div>
-			<div><label for="rad">Radius</label><input type="number" id="rad" value="5000"></div>
+		<div class="hint mono" id="seedout"></div>
+		<div class="field">
+			<label for="cx">Centre</label>
+			<input type="number" id="cx" value="0" title="centre X">
+			<input type="number" id="cz" value="0" title="centre Z">
+			<label for="rad">Radius</label>
+			<input type="number" id="rad" value="5000">
 		</div>
-		<div class="row" style="margin-top:8px">
-			<div><label for="x0">From X</label><input type="number" id="x0" value="-5000"></div>
-			<div><label for="z0">From Z</label><input type="number" id="z0" value="-5000"></div>
+		<div class="field">
+			<label for="x0">X</label>
+			<input type="number" id="x0" value="-5000" title="from X, inclusive">
+			<span class="sep">→</span>
+			<input type="number" id="x1" value="5000" title="to X, exclusive">
 		</div>
-		<div class="row" style="margin-top:6px">
-			<div><label for="x1">To X</label><input type="number" id="x1" value="5000"></div>
-			<div><label for="z1">To Z</label><input type="number" id="z1" value="5000"></div>
+		<div class="field">
+			<label for="z0">Z</label>
+			<input type="number" id="z0" value="-5000" title="from Z, inclusive">
+			<span class="sep">→</span>
+			<input type="number" id="z1" value="5000" title="to Z, exclusive">
 		</div>
-		<div class="why" style="margin-top:6px;color:var(--dim);font-size:11px" id="area"></div>
 	</div>
 
 	<div class="card">
 		<h2>Pattern</h2>
-		<div class="tabs" id="tabs"></div>
+		<div class="toolrow">
+			<div class="tabs" id="tabs"></div>
+			<div class="sizebar">
+				<input type="number" id="gw" value="5" min="1" max="16" title="pattern width (X)">
+				<span class="sep">×</span>
+				<input type="number" id="gh" value="5" min="1" max="16" title="pattern depth (Z)">
+				<button class="sm" id="clear">clear</button>
+				<button class="sm" id="fill">fill</button>
+			</div>
+		</div>
 		<div id="picker">
 			<div class="plist">
 				<div><b>Floor</b><div id="pfloor"></div></div>
@@ -222,23 +279,13 @@ details pre { background: var(--sunk); padding: 8px; overflow: auto; border: 1px
 				there may not match a vanilla world.</div>
 		</div>
 
-		<div class="flexbar">
-			<label style="margin:0">Size</label>
-			<input type="number" id="gw" value="5" min="1" max="16" style="width:52px">
-			<span class="why">×</span>
-			<input type="number" id="gh" value="5" min="1" max="16" style="width:52px">
-			<div class="spacer"></div>
-			<button class="sm" id="clear">clear</button>
-			<button class="sm" id="fill">fill</button>
-		</div>
 		<div class="axis"><span>X →</span><span id="ysel"></span></div>
-		<div id="grid"></div>
+		<div id="grid" title="drag to paint a run of cells"></div>
 		<div class="legend">
 			<span><i class="cell on"></i>bedrock <kbd>left</kbd></span>
 			<span><i class="cell off"></i>not bedrock <kbd>right</kbd></span>
 			<span><i class="cell"></i>any <kbd>middle</kbd></span>
 		</div>
-		<div class="legend" style="margin-top:4px">drag to paint a run</div>
 
 		<div class="est" id="est"></div>
 		<button class="go" id="run">Search</button>
@@ -265,12 +312,12 @@ details pre { background: var(--sunk); padding: 8px; overflow: auto; border: 1px
 		</div>
 	</div>
 
-	<div class="card">
+	<div class="card grow">
 		<h2>Bedrock viewer</h2>
 		<div class="viewwrap"><canvas id="view" width="384" height="384"></canvas></div>
 		<div class="viewbar">
-			<label style="margin:0">Y</label>
-			<select id="vy" style="background:var(--sunk);color:var(--text);border:1px solid var(--edge);padding:3px"></select>
+			<label>Y</label>
+			<select id="vy"></select>
 			<button class="sm" id="zout">−</button>
 			<button class="sm" id="zin">+</button>
 			<span class="at" id="vat"></span>
@@ -413,7 +460,8 @@ function bytes(n) {
  * Free, and it is the whole defence against a search that emits 12 GB of text. */
 function estimate() {
 	const b = blocks(), bd = bounds();
-	const area = Math.max(0, bd.x1 - bd.x0) * Math.max(0, bd.z1 - bd.z0);
+	const w = Math.max(0, bd.x1 - bd.x0), h = Math.max(0, bd.z1 - bd.z0);
+	const area = w * h;
 	let p = 1, dead = null;
 	for (const [, y, , want] of b) {
 		const q = want ? pOf(y) : 1 - pOf(y);
@@ -421,29 +469,33 @@ function estimate() {
 			dead = "y=" + y + " is " + (pOf(y) ? "always" : "never") + " bedrock, but the pattern wants the opposite";
 		p *= q;
 	}
-	return { area, p, n: area * p, blocks: b.length, dead };
+	return { area, w, h, p, n: area * p, blocks: b.length, dead };
 }
 
 function renderEstimate() {
 	const e = estimate(), el = $("est");
+	/* the search dimensions live here rather than under the bounds fields: same
+	 * information, one fewer row in a column that has to fit on screen */
+	const dims = fmt(e.w) + "×" + fmt(e.h) + " = " + human(e.area) + " columns";
 	el.className = "est";
-	if (!e.blocks) {
+	if (!e.area) {
 		el.className = "est bad";
-		el.innerHTML = "<b>Empty pattern</b><div class='why'>Every column would match. "
-			+ "Click cells to place at least one block.</div>";
+		el.innerHTML = "<b>Empty area</b><div class='why'>From must be less than To "
+			+ "on both axes.</div>";
+	} else if (!e.blocks) {
+		el.className = "est bad";
+		el.innerHTML = "<b>Empty pattern</b><div class='why'>Every one of " + dims
+			+ " would match. Click cells to place at least one block.</div>";
 	} else if (e.dead) {
 		el.className = "est bad";
 		el.innerHTML = "<b>No matches possible</b><div class='why'>" + e.dead + ".</div>";
-	} else if (!e.area) {
-		el.className = "est bad";
-		el.innerHTML = "<b>Empty area</b><div class='why'>From must be less than To on both axes.</div>";
 	} else {
 		const big = e.n > 200000;
 		if (big) el.className = "est warn";
 		el.innerHTML = "<b>≈ " + human(e.n) + " matches</b> <span class='why'>expected · ~"
 			+ bytes(e.n * 34) + "</span><div class='why'>" + e.blocks + " blocks · 1 in "
-			+ human(1 / e.p) + " columns · searching " + human(e.area)
-			+ (big ? " · large result set, only the first 2,000 are listed" : "") + "</div>";
+			+ human(1 / e.p) + " · " + dims
+			+ (big ? " · listing the first 2,000" : "") + "</div>";
 	}
 	$("run").disabled = !e.blocks || !!e.dead || !e.area;
 }
@@ -523,7 +575,8 @@ function renderGrid() {
 	 * same count but need a different column template and different closures. */
 	if (g.dataset.dims !== dims) {
 		g.dataset.dims = dims;
-		g.style.gridTemplateColumns = "repeat(" + S.w + ", 26px)";
+		g.style.setProperty("--cols", S.w);
+		g.style.setProperty("--rows", S.h);
 		g.innerHTML = "";
 		for (let z = 0; z < S.h; z++)
 			for (let x = 0; x < S.w; x++) {
@@ -727,8 +780,11 @@ let vImg = null, vAt = null, vTimer = null;
  * `scale` device pixels. A fractional stretch makes pixelated upscaling produce
  * visibly uneven blocks. */
 function vFit() {
-	const c = $("view"), w = Math.max(64, Math.floor(c.clientWidth));
+	const c = $("view");
+	const w = Math.max(64, Math.floor(c.clientWidth));
+	const h = Math.max(64, Math.floor(c.clientHeight));
 	if (c.width !== w) c.width = w;
+	if (c.height !== h) c.height = h;
 }
 function vDims() {
 	const c = $("view"), k = S.view.scale;
@@ -820,16 +876,8 @@ function renderVy() {
 
 function copy(t) { navigator.clipboard.writeText(t); }
 
-function renderArea() {
-	const b = bounds();
-	const w = b.x1 - b.x0, h = b.z1 - b.z0;
-	$("area").textContent = w > 0 && h > 0
-		? fmt(w) + " × " + fmt(h) + " = " + human(w * h) + " columns"
-		: "empty area";
-}
-
 function renderAll() {
-	renderTabs(); renderGrid(); renderArea(); renderEstimate(); renderCli(); renderVy();
+	renderTabs(); renderGrid(); renderEstimate(); renderCli(); renderVy();
 	save();
 }
 
@@ -859,12 +907,14 @@ function load() {
 $("seed").oninput = (e) => {
 	S.seedText = e.target.value;
 	const s = seedValue();
-	$("seedout").textContent = s.n ? (s.how || "seed " + s.n) : s.how;
+	/* empty for a plain integer -- .hint:empty collapses, so the row only costs
+	 * height when it has something to say (text seed, or out of range) */
+	$("seedout").textContent = s.how;
 	$("seedout").style.color = s.n ? "var(--dim)" : "var(--bad)";
 	renderCli(); save(); vRefresh();
 };
 for (const id of ["x0", "z0", "x1", "z1"])
-	$(id).oninput = () => { renderArea(); renderEstimate(); renderCli(); drawScatter(); save(); };
+	$(id).oninput = () => { renderEstimate(); renderCli(); drawScatter(); save(); };
 for (const id of ["cx", "cz", "rad"])
 	$(id).oninput = () => {
 		const cx = numOf("cx"), cz = numOf("cz"), r = numOf("rad");
@@ -874,7 +924,7 @@ for (const id of ["cx", "cz", "rad"])
 		const a = Math.abs(r);
 		$("x0").value = cx - a; $("z0").value = cz - a;
 		$("x1").value = cx + a; $("z1").value = cz + a;
-		renderArea(); renderEstimate(); renderCli(); drawScatter(); save();
+		renderEstimate(); renderCli(); drawScatter(); save();
 	};
 for (const id of ["gw", "gh"])
 	$(id).oninput = () => {
