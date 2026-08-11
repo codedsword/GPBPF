@@ -55,7 +55,8 @@ gpbpf 12345 0 0 20000 20000 0,-60,0:1 1,-60,0:1 0,-60,1:1
 ## Web GUI
 
 screenshot: 
-<img width="333" height="170" alt="image" src="https://github.com/user-attachments/assets/7015b143-e40e-4be4-8005-45b49b7a053f" />
+<img width="1918" height="895" alt="image" src="https://github.com/user-attachments/assets/2d7d407c-a2b1-48ca-a7cd-b8270a101ec8" />
+
 
 ```sh
 make web      # http://localhost:8765
