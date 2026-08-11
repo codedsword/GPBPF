@@ -1,0 +1,918 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GPBPF — bedrock pattern finder</title>
+<style>
+:root {
+	--bg:      #101015;
+	--panel:   #1a1a22;
+	--sunk:    #121218;
+	--edge:    #33333f;
+	--hi:      #4a4a5a;
+	--lo:      #0c0c10;
+	--text:    #c9c9d6;
+	--dim:     #74748a;
+	--accent:  #7bb85f;
+	--warn:    #d9a441;
+	--bad:     #c9564e;
+	--rock:    #8d8d99;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+	background: var(--bg);
+	color: var(--text);
+	font: 13px/1.5 ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+	display: flex;
+	flex-direction: column;
+}
+h1 { font-size: 15px; margin: 0; letter-spacing: .14em; text-transform: uppercase; }
+h2 {
+	font-size: 11px; margin: 0 0 8px; letter-spacing: .16em;
+	text-transform: uppercase; color: var(--dim); font-weight: 600;
+}
+a { color: var(--accent); }
+code, .mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; }
+
+/* blocky bevelled chrome, the one bit of Minecraft styling that earns its keep */
+.bevel { border: 2px solid; border-color: var(--hi) var(--lo) var(--lo) var(--hi); }
+
+header {
+	display: flex; align-items: center; gap: 14px;
+	padding: 10px 16px; background: var(--panel);
+	border-bottom: 2px solid var(--lo);
+}
+header .sub { color: var(--dim); font-size: 12px; }
+header .spacer { flex: 1; }
+
+main {
+	flex: 1; display: grid; grid-template-columns: 340px 1fr;
+	gap: 12px; padding: 12px; overflow: hidden;
+}
+@media (max-width: 900px) { main { grid-template-columns: 1fr; overflow: auto; } }
+
+.col { display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow-y: auto; }
+.card { background: var(--panel); padding: 12px; border: 1px solid var(--edge); }
+
+label { display: block; font-size: 11px; color: var(--dim); margin-bottom: 3px; }
+input[type=text], input[type=number] {
+	background: var(--sunk); color: var(--text); width: 100%;
+	border: 2px solid; border-color: var(--lo) var(--hi) var(--hi) var(--lo);
+	padding: 5px 7px; font: inherit; font-family: ui-monospace, monospace;
+}
+input:focus { outline: 1px solid var(--accent); outline-offset: 1px; }
+.row { display: flex; gap: 8px; }
+.row > * { flex: 1; min-width: 0; }
+
+button {
+	background: var(--panel); color: var(--text); font: inherit; cursor: pointer;
+	padding: 5px 10px;
+	border: 2px solid; border-color: var(--hi) var(--lo) var(--lo) var(--hi);
+}
+button:hover { background: #23232d; }
+button:active { border-color: var(--lo) var(--hi) var(--hi) var(--lo); }
+button.go {
+	width: 100%; padding: 11px; margin-top: 10px; font-weight: 700;
+	letter-spacing: .18em; text-transform: uppercase;
+	background: #33501f; color: #d9f0c8; border-color: #5f8b45 #16240c #16240c #5f8b45;
+}
+button.go:hover { background: #3d5f26; }
+button.go:disabled { background: #22222a; color: var(--dim); border-color: var(--edge); cursor: not-allowed; }
+button.sm { padding: 2px 7px; font-size: 11px; }
+
+.tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; }
+.tab { font-family: ui-monospace, monospace; }
+.tab.on { background: #2c3a22; border-color: var(--accent) var(--lo) var(--lo) var(--accent); }
+
+/* pattern grid ---------------------------------------------------------- */
+#grid { display: grid; gap: 2px; user-select: none; touch-action: none; width: max-content; }
+.cell {
+	width: 26px; height: 26px; padding: 0; background: #1f1f28;
+	border: 1px solid #2b2b36; position: relative;
+}
+.cell::after {
+	content: ""; position: absolute; inset: 45%; background: #34343f; border-radius: 50%;
+}
+.cell.on {
+	background: var(--rock); border-color: #adadb8 #62626d #62626d #adadb8; border-width: 2px;
+}
+.cell.on::after { content: none; }
+.cell.off { background: #241a1c; border-color: #6b3b3b; }
+.cell.off::after {
+	content: ""; inset: 0; border-radius: 0; background: none;
+	background-image: linear-gradient(45deg, transparent 44%, var(--bad) 44%, var(--bad) 56%, transparent 56%);
+}
+.axis { color: var(--dim); font-size: 10px; display: flex; justify-content: space-between; }
+
+.legend { display: flex; gap: 14px; font-size: 11px; color: var(--dim); margin-top: 8px; }
+/* swatches keep .cell's position:relative -- its ::after is absolute, and a
+ * static parent would let inset:0 resolve against the page instead */
+.legend i { width: 13px; height: 13px; display: inline-block; vertical-align: -2px; margin-right: 5px; }
+kbd {
+	font: 10px ui-monospace, monospace; color: var(--text); background: #26262f;
+	border: 1px solid var(--edge); border-bottom-width: 2px; border-radius: 2px;
+	padding: 0 4px; margin-left: 2px;
+}
+
+.est { margin-top: 10px; padding: 8px; background: var(--sunk); border-left: 3px solid var(--accent); }
+.est.warn { border-color: var(--warn); }
+.est.bad  { border-color: var(--bad); }
+.est b { font-size: 15px; font-family: ui-monospace, monospace; }
+.est .why { color: var(--dim); font-size: 11px; }
+
+/* layer picker ---------------------------------------------------------- */
+#picker { display: none; margin-top: 8px; padding: 10px; background: var(--sunk); border: 1px solid var(--edge); }
+#picker.open { display: block; }
+.plist { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.plist button { display: block; width: 100%; text-align: left; margin-bottom: 3px; font-family: ui-monospace, monospace; }
+.plist small { color: var(--dim); float: right; }
+.note { font-size: 11px; color: var(--warn); margin-top: 8px; }
+
+/* results --------------------------------------------------------------- */
+.stat { display: flex; gap: 18px; align-items: baseline; margin-bottom: 8px; flex-wrap: wrap; }
+.stat b { font-size: 20px; font-family: ui-monospace, monospace; }
+.stat span { color: var(--dim); font-size: 12px; }
+.banner { padding: 7px 9px; margin-bottom: 8px; background: #2e2413; border-left: 3px solid var(--warn); font-size: 12px; }
+.banner.bad { background: #2e1614; border-color: var(--bad); }
+
+#scatter { width: 100%; height: 130px; display: block; background: var(--sunk); border: 1px solid var(--edge); cursor: crosshair; }
+.tablewrap { overflow: auto; max-height: 260px; border: 1px solid var(--edge); background: var(--sunk); }
+table { width: 100%; border-collapse: collapse; font-family: ui-monospace, monospace; font-size: 12px; }
+th {
+	text-align: right; color: var(--dim); font-weight: 600; font-size: 10px;
+	letter-spacing: .1em; text-transform: uppercase;
+	padding: 5px 9px; position: sticky; top: 0; background: #202029;
+}
+td { text-align: right; padding: 3px 9px; border-top: 1px solid #23232c; }
+tbody tr { cursor: pointer; }
+tbody tr:hover { background: #23232d; }
+tbody tr.on { background: #2c3a22; }
+
+/* viewer ---------------------------------------------------------------- */
+.viewwrap { position: relative; background: #0b0b0e; border: 1px solid var(--edge); }
+#view { display: block; width: 100%; height: 384px; cursor: grab; image-rendering: pixelated; }
+#view.drag { cursor: grabbing; }
+.viewbar { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; font-size: 12px; }
+.viewbar .at { color: var(--dim); font-family: ui-monospace, monospace; }
+
+footer { padding: 10px 16px; background: var(--panel); border-top: 2px solid var(--lo); }
+#cli {
+	display: block; background: var(--sunk); padding: 8px 10px; overflow-x: auto;
+	white-space: pre; font-size: 12px; color: #9fb98d; border: 1px solid var(--edge);
+}
+details { margin-top: 8px; font-size: 12px; }
+summary { cursor: pointer; color: var(--dim); }
+details pre { background: var(--sunk); padding: 8px; overflow: auto; border: 1px solid var(--edge); }
+.flexbar { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
+.flexbar .spacer { flex: 1; }
+.hide { display: none; }
+</style>
+
+<header>
+	<h1>GPBPF</h1>
+	<div class="sub">bedrock pattern finder</div>
+	<div class="spacer"></div>
+	<div class="sub" id="binfo"></div>
+</header>
+
+<main>
+<div class="col">
+
+	<div class="card">
+		<h2>World</h2>
+		<label for="seed">Seed</label>
+		<input type="text" id="seed" value="12345" spellcheck="false">
+		<div class="est" style="border-color:var(--edge);margin-top:6px;padding:5px 8px">
+			<span class="why mono" id="seedout"></span>
+		</div>
+	</div>
+
+	<div class="card">
+		<h2>Search area</h2>
+		<div class="row">
+			<div><label for="cx">Centre X</label><input type="number" id="cx" value="0"></div>
+			<div><label for="cz">Centre Z</label><input type="number" id="cz" value="0"></div>
+			<div><label for="rad">Radius</label><input type="number" id="rad" value="5000"></div>
+		</div>
+		<div class="row" style="margin-top:8px">
+			<div><label for="x0">From X</label><input type="number" id="x0" value="-5000"></div>
+			<div><label for="z0">From Z</label><input type="number" id="z0" value="-5000"></div>
+		</div>
+		<div class="row" style="margin-top:6px">
+			<div><label for="x1">To X</label><input type="number" id="x1" value="5000"></div>
+			<div><label for="z1">To Z</label><input type="number" id="z1" value="5000"></div>
+		</div>
+		<div class="why" style="margin-top:6px;color:var(--dim);font-size:11px" id="area"></div>
+	</div>
+
+	<div class="card">
+		<h2>Pattern</h2>
+		<div class="tabs" id="tabs"></div>
+		<div id="picker">
+			<div class="plist">
+				<div><b>Floor</b><div id="pfloor"></div></div>
+				<div><b>Roof</b><div id="proof"></div></div>
+			</div>
+			<div class="row" style="margin-top:8px">
+				<input type="number" id="customy" placeholder="other Y">
+				<button class="sm" id="addcustom">add</button>
+			</div>
+			<div class="note">Roof layers reproduce the original's inverted band (solid at
+				123, plus an always-bedrock layer at 128). Kept for bit-exactness — results
+				there may not match a vanilla world.</div>
+		</div>
+
+		<div class="flexbar">
+			<label style="margin:0">Size</label>
+			<input type="number" id="gw" value="5" min="1" max="16" style="width:52px">
+			<span class="why">×</span>
+			<input type="number" id="gh" value="5" min="1" max="16" style="width:52px">
+			<div class="spacer"></div>
+			<button class="sm" id="clear">clear</button>
+			<button class="sm" id="fill">fill</button>
+		</div>
+		<div class="axis"><span>X →</span><span id="ysel"></span></div>
+		<div id="grid"></div>
+		<div class="legend">
+			<span><i class="cell on"></i>bedrock <kbd>left</kbd></span>
+			<span><i class="cell off"></i>not bedrock <kbd>right</kbd></span>
+			<span><i class="cell"></i>any <kbd>middle</kbd></span>
+		</div>
+		<div class="legend" style="margin-top:4px">drag to paint a run</div>
+
+		<div class="est" id="est"></div>
+		<button class="go" id="run">Search</button>
+	</div>
+
+</div>
+
+<div class="col">
+
+	<div class="card">
+		<h2>Results</h2>
+		<div id="rbanner"></div>
+		<div class="stat" id="stat"><span>Draw a pattern and hit search.</span></div>
+		<canvas id="scatter"></canvas>
+		<div class="tablewrap" style="margin-top:8px">
+			<table>
+				<thead><tr><th>X</th><th>Z</th><th>distance</th><th></th></tr></thead>
+				<tbody id="rows"></tbody>
+			</table>
+		</div>
+		<div class="flexbar" style="margin-top:8px">
+			<button class="sm" id="copyall">copy coordinates</button>
+			<button class="sm" id="dl">download all (.txt)</button>
+		</div>
+	</div>
+
+	<div class="card">
+		<h2>Bedrock viewer</h2>
+		<div class="viewwrap"><canvas id="view" width="384" height="384"></canvas></div>
+		<div class="viewbar">
+			<label style="margin:0">Y</label>
+			<select id="vy" style="background:var(--sunk);color:var(--text);border:1px solid var(--edge);padding:3px"></select>
+			<button class="sm" id="zout">−</button>
+			<button class="sm" id="zin">+</button>
+			<span class="at" id="vat"></span>
+			<div class="spacer"></div>
+			<span class="why" style="color:var(--dim);font-size:11px">drag to pan · click a result to jump</span>
+		</div>
+	</div>
+
+</div>
+</main>
+
+<footer>
+	<div class="flexbar">
+		<h2 style="margin:0">Equivalent command</h2>
+		<div class="spacer"></div>
+		<button class="sm" id="copycli">copy</button>
+	</div>
+	<code id="cli"></code>
+	<details>
+		<summary>Equivalent pattern/*.txt files</summary>
+		<div id="txt"></div>
+	</details>
+</footer>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const CARE = -1, WANT_NOT = 0, WANT = 1;
+
+/* Bedrock probability by layer. Fully determined by bd_classify() in bedrock.h:
+ * the floor deriver covers y<0, the roof deriver y>=0, and everything outside
+ * the two five-block bands resolves to a constant. Confirmed empirically at
+ * 1M columns per layer. */
+function pOf(y) {
+	if (y < 0) {                       /* BEDROCK_FLOOR */
+		if (y <= -64) return 1;
+		if (y >= -59) return 0;
+		return (-59 - y) / 5;          /* -63:.8 -62:.6 -61:.4 -60:.2 */
+	}
+	if (y === 128) return 1;           /* BEDROCK_ROOF, incl. the phantom layer */
+	if (y < 123 || y > 128) return 0;
+	return (128 - y) / 5;              /* 123:1 124:.8 125:.6 126:.4 127:.2 */
+}
+function pLabel(y) {
+	const p = pOf(y);
+	return p === 1 ? "always" : p === 0 ? "never" : Math.round(p * 100) + "%";
+}
+
+/* Java String.hashCode, which is exactly how Minecraft turns a text seed into a
+ * number. The CLI itself only accepts integers (Main.java:21, main.c:513), so we
+ * resolve it here and show the result. */
+function javaHash(s) {
+	let h = 0;
+	for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
+	return h;
+}
+
+const S = {
+	seedText: "12345",
+	layers: [{ y: -60, cells: [] }],
+	active: 0,
+	w: 5, h: 5,
+	view: { y: -60, x0: -32, z0: -32, scale: 6 },
+	res: null, sel: -1,
+};
+
+/* Layers always store a full MAXW x MAXW grid and S.w/S.h only say how much of
+ * it is shown. Shrinking the grid therefore keeps what you drew, so typing "16"
+ * over "5" does not wipe four columns as it passes through "1". */
+const MAXW = 16;
+const newCells = () => new Array(MAXW * MAXW).fill(CARE);
+
+function activeLayer() { return S.layers[S.active]; }
+function cellAt(L, x, z) { const v = L.cells[z * MAXW + x]; return v === undefined ? CARE : v; }
+function resize(w, h) { S.w = w; S.h = h; }
+function setRegion(v) {
+	const L = activeLayer();
+	for (let z = 0; z < S.h; z++)
+		for (let x = 0; x < S.w; x++) L.cells[z * MAXW + x] = v;
+}
+
+/* ---- inputs ----------------------------------------------------------- */
+
+function seedValue() {
+	const t = S.seedText.trim();
+	if (/^-?\d+$/.test(t)) {
+		try {
+			const n = BigInt(t);
+			if (n >= -(2n ** 63n) && n < 2n ** 63n) return { n: t, how: "" };
+			return { n: null, how: "does not fit in a 64-bit seed" };
+		} catch (e) { /* fall through */ }
+	}
+	if (!t) return { n: "0", how: "empty → 0" };
+	return { n: String(javaHash(t)), how: "text seed → " + javaHash(t) };
+}
+
+/* Integer or null. `+v | 0` read a half-typed field as 0, and silently wrapped
+ * anything past int32 -- so an out-of-range coordinate reached the server as a
+ * different number rather than as an error. */
+const numOf = (id) => {
+	const v = $(id).value.trim();
+	return /^-?\d+$/.test(v) ? +v : null;
+};
+
+function bounds() {
+	const g = (id) => { const n = numOf(id); return n === null ? 0 : n; };
+	return { x0: g("x0"), z0: g("z0"), x1: g("x1"), z1: g("z1") };
+}
+
+function blocks() {
+	const out = [];
+	for (const L of S.layers)
+		for (let z = 0; z < S.h; z++)
+			for (let x = 0; x < S.w; x++) {
+				const v = cellAt(L, x, z);
+				if (v !== CARE) out.push([x, L.y, z, v]);
+			}
+	return out;
+}
+
+/* ---- estimate ---------------------------------------------------------- */
+
+const fmt = (n) => n.toLocaleString("en-US");
+function human(n) {
+	if (n < 1000) return String(Math.round(n));
+	const u = ["k", "M", "B", "T"];
+	let i = -1;
+	while (n >= 1000 && i < 3) { n /= 1000; i++; }
+	return n.toFixed(n < 10 ? 1 : 0) + u[i];
+}
+function bytes(n) {
+	const u = ["B", "KB", "MB", "GB", "TB"];
+	let i = 0;
+	while (n >= 1024 && i < 4) { n /= 1024; i++; }
+	return n.toFixed(n < 10 && i ? 1 : 0) + " " + u[i];
+}
+
+/* Expected matches = area * prod(p or 1-p). Every block is a distinct (x,y,z),
+ * so its draw comes from a distinct RNG stream and the factors are independent.
+ * Free, and it is the whole defence against a search that emits 12 GB of text. */
+function estimate() {
+	const b = blocks(), bd = bounds();
+	const area = Math.max(0, bd.x1 - bd.x0) * Math.max(0, bd.z1 - bd.z0);
+	let p = 1, dead = null;
+	for (const [, y, , want] of b) {
+		const q = want ? pOf(y) : 1 - pOf(y);
+		if (q === 0 && !dead)
+			dead = "y=" + y + " is " + (pOf(y) ? "always" : "never") + " bedrock, but the pattern wants the opposite";
+		p *= q;
+	}
+	return { area, p, n: area * p, blocks: b.length, dead };
+}
+
+function renderEstimate() {
+	const e = estimate(), el = $("est");
+	el.className = "est";
+	if (!e.blocks) {
+		el.className = "est bad";
+		el.innerHTML = "<b>Empty pattern</b><div class='why'>Every column would match. "
+			+ "Click cells to place at least one block.</div>";
+	} else if (e.dead) {
+		el.className = "est bad";
+		el.innerHTML = "<b>No matches possible</b><div class='why'>" + e.dead + ".</div>";
+	} else if (!e.area) {
+		el.className = "est bad";
+		el.innerHTML = "<b>Empty area</b><div class='why'>From must be less than To on both axes.</div>";
+	} else {
+		const big = e.n > 200000;
+		if (big) el.className = "est warn";
+		el.innerHTML = "<b>≈ " + human(e.n) + " matches</b> <span class='why'>expected · ~"
+			+ bytes(e.n * 34) + "</span><div class='why'>" + e.blocks + " blocks · 1 in "
+			+ human(1 / e.p) + " columns · searching " + human(e.area)
+			+ (big ? " · large result set, only the first 2,000 are listed" : "") + "</div>";
+	}
+	$("run").disabled = !e.blocks || !!e.dead || !e.area;
+}
+
+/* ---- pattern editor ---------------------------------------------------- */
+
+function renderTabs() {
+	const t = $("tabs");
+	t.innerHTML = "";
+	S.layers.forEach((L, i) => {
+		const b = document.createElement("button");
+		b.className = "tab sm" + (i === S.active ? " on" : "");
+		b.textContent = "y=" + L.y;
+		b.title = pLabel(L.y) + " bedrock";
+		b.onclick = () => { S.active = i; S.view.y = L.y; renderAll(); vRefresh(); };
+		b.oncontextmenu = (ev) => {
+			ev.preventDefault();
+			if (S.layers.length > 1) {
+				S.layers.splice(i, 1);
+				S.active = Math.min(S.active, S.layers.length - 1);
+				renderAll();
+			}
+		};
+		t.appendChild(b);
+	});
+	const add = document.createElement("button");
+	add.className = "sm";
+	add.textContent = "+ layer";
+	add.onclick = () => $("picker").classList.toggle("open");
+	t.appendChild(add);
+	$("ysel").textContent = "y=" + activeLayer().y + " · " + pLabel(activeLayer().y) + " bedrock  ↓ Z";
+}
+
+function renderPicker() {
+	const mk = (host, ys) => {
+		host.innerHTML = "";
+		for (const y of ys) {
+			const b = document.createElement("button");
+			b.className = "sm";
+			b.innerHTML = "y=" + y + "<small>" + pLabel(y) + "</small>";
+			b.onclick = () => addLayer(y);
+			host.appendChild(b);
+		}
+	};
+	mk($("pfloor"), [-64, -63, -62, -61, -60]);
+	mk($("proof"), [123, 124, 125, 126, 127, 128]);
+}
+
+function addLayer(y) {
+	const at = S.layers.findIndex((L) => L.y === y);
+	if (at >= 0) { S.active = at; }
+	else {
+		S.layers.push({ y, cells: newCells() });
+		S.layers.sort((a, b) => a.y - b.y);
+		S.active = S.layers.findIndex((L) => L.y === y);
+	}
+	S.view.y = y;
+	$("picker").classList.remove("open");
+	renderAll();
+	vRefresh();
+}
+
+/* left = bedrock, right = not bedrock, middle = don't care. A button per state
+ * beats cycling: painting a run of cells is one gesture instead of one to three
+ * clicks each, and dragging never has to guess what you meant. */
+const BTN = { 0: WANT, 1: CARE, 2: WANT_NOT };
+const cls = (v) => "cell" + (v === WANT ? " on" : v === WANT_NOT ? " off" : "");
+
+let paint = null, dirty = false;
+
+function renderGrid() {
+	const g = $("grid"), dims = S.w + "x" + S.h;
+	/* Rebuild only when the footprint changes. Recreating the cells on every
+	 * edit was the jank: it destroyed the element under the cursor mid-drag, so
+	 * its replacement never received pointerenter and strokes came out patchy.
+	 * Keyed on the dimensions rather than the cell count -- 4x6 and 6x4 have the
+	 * same count but need a different column template and different closures. */
+	if (g.dataset.dims !== dims) {
+		g.dataset.dims = dims;
+		g.style.gridTemplateColumns = "repeat(" + S.w + ", 26px)";
+		g.innerHTML = "";
+		for (let z = 0; z < S.h; z++)
+			for (let x = 0; x < S.w; x++) {
+				const c = document.createElement("div");
+				c.title = "x+" + x + ", z+" + z;
+				c.onpointerdown = (ev) => {
+					/* touch has one button, so it keeps the cycle */
+					const v = cellAt(activeLayer(), x, z);
+					paint = ev.pointerType === "touch"
+						? (v === CARE ? WANT : v === WANT ? WANT_NOT : CARE)
+						: BTN[ev.button];
+					if (paint === undefined) { paint = null; return; }
+					ev.preventDefault();  /* text selection, middle-click autoscroll */
+					setCell(x, z, c);
+				};
+				c.onpointerenter = () => { if (paint !== null) setCell(x, z, c); };
+				g.appendChild(c);
+			}
+	}
+	const L = activeLayer();
+	let i = 0;
+	for (let z = 0; z < S.h; z++)
+		for (let x = 0; x < S.w; x++) g.children[i++].className = cls(cellAt(L, x, z));
+}
+
+/* Takes the element instead of looking it up. The cell store is MAXW-strided
+ * and the DOM is S.w-strided; indexing one with the other is precisely the bug
+ * this signature makes impossible. The element that received the event is the
+ * element to repaint, and that cannot drift. */
+function setCell(x, z, el) {
+	const L = activeLayer(), i = z * MAXW + x;
+	if (L.cells[i] === paint) return;
+	L.cells[i] = paint;
+	el.className = cls(paint);
+	renderEstimate();   /* cheap, and it is the feedback worth having live */
+	dirty = true;
+}
+
+/* The rest of the work waits for the stroke to end -- rebuilding the command
+ * line and the pattern/*.txt export on every cell was the other half of the lag. */
+addEventListener("pointerup", () => {
+	if (paint === null) return;
+	paint = null;
+	if (dirty) { renderCli(); save(); vDraw(); dirty = false; }
+});
+$("grid").oncontextmenu = (ev) => ev.preventDefault();
+$("grid").onauxclick = (ev) => ev.preventDefault();
+
+/* ---- command + pattern files ------------------------------------------ */
+
+function argv() {
+	const s = seedValue(), b = bounds();
+	if (!s.n) return null;
+	return ["./gpbpf", s.n, String(b.x0), String(b.z0), String(b.x1), String(b.z1)]
+		.concat(blocks().map(([x, y, z, w]) => x + "," + y + "," + z + ":" + w));
+}
+function renderCli() {
+	const a = argv();
+	$("cli").textContent = a ? a.join(" ") : "(fix the seed first)";
+	const t = $("txt");
+	t.innerHTML = "";
+	for (const L of S.layers) {
+		let s = "";
+		for (let z = 0; z < S.h; z++) {
+			for (let x = 0; x < S.w; x++) {
+				const v = cellAt(L, x, z);
+				s += v === WANT ? "1" : v === WANT_NOT ? "0" : " ";
+			}
+			s += "\n";
+		}
+		const d = document.createElement("div");
+		d.innerHTML = "<div class='why' style='color:var(--dim);margin-top:6px'>pattern/"
+			+ L.y + ".txt</div><pre>" + s.replace(/</g, "&lt;") + "</pre>";
+		t.appendChild(d);
+	}
+}
+
+/* ---- search ------------------------------------------------------------ */
+
+function reqBody(limit) {
+	const s = seedValue(), b = bounds();
+	return { seed: s.n, fromX: b.x0, fromZ: b.z0, toX: b.x1, toZ: b.z1,
+	         blocks: blocks(), limit };
+}
+
+async function search() {
+	const btn = $("run");
+	btn.disabled = true;
+	btn.textContent = "Searching…";
+	$("rbanner").innerHTML = "";
+	try {
+		const r = await fetch("/api/search", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(reqBody(2000)),
+		});
+		const d = await r.json();
+		if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
+		S.res = d;
+		S.sel = -1;
+		renderResults();
+	} catch (e) {
+		S.res = null;
+		$("rbanner").innerHTML = "<div class='banner bad'>" + esc(e.message) + "</div>";
+		$("stat").innerHTML = "<span>Search failed.</span>";
+		$("rows").innerHTML = "";
+		drawScatter();
+	}
+	btn.textContent = "Search";
+	renderEstimate();
+}
+
+const esc = (s) => String(s).replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
+
+function renderResults() {
+	const d = S.res;
+	$("stat").innerHTML = "<b>" + fmt(d.count) + "</b><span>match" + (d.count === 1 ? "" : "es")
+		+ "</span><b>" + d.elapsed.toFixed(2) + "s</b><span>over " + human(d.area) + " columns</span>"
+		+ "<span>1 in " + (d.count ? human(d.area / d.count) : "∞") + "</span>";
+
+	let ban = "";
+	for (const w of d.warnings)
+		ban += "<div class='banner" + (/exceeded/.test(w) ? " bad" : "") + "'>" + esc(w) + "</div>";
+	if (d.truncated)
+		ban += "<div class='banner'>Showing the first " + fmt(d.matches.length) + " of "
+			+ fmt(d.count) + ". Use <b>download all</b> for the rest.</div>";
+	$("rbanner").innerHTML = ban;
+
+	const tb = $("rows");
+	tb.innerHTML = "";
+	d.matches.forEach((m, i) => {
+		const tr = document.createElement("tr");
+		tr.innerHTML = "<td>" + m[0] + "</td><td>" + m[1] + "</td><td>" + fmt(m[2]) + "</td>"
+			+ "<td><button class='sm'>/tp</button></td>";
+		tr.onclick = () => select(i, true);
+		tr.querySelector("button").onclick = (ev) => {
+			ev.stopPropagation();
+			copy("/tp @s " + m[0] + " ~ " + m[1]);
+			ev.target.textContent = "copied";
+			setTimeout(() => { ev.target.textContent = "/tp"; }, 900);
+		};
+		tb.appendChild(tr);
+	});
+	drawScatter();
+}
+
+function select(i, jump) {
+	S.sel = i;
+	[...$("rows").children].forEach((tr, k) => tr.classList.toggle("on", k === i));
+	if (jump && S.res) {
+		const m = S.res.matches[i], d = vDims();
+		S.view.x0 = m[0] - (d.w >> 1);
+		S.view.z0 = m[1] - (d.h >> 1);
+		vRefresh();
+	}
+	drawScatter();
+	vDraw();
+}
+
+function drawScatter() {
+	const c = $("scatter"), g = c.getContext("2d");
+	c.width = c.clientWidth; c.height = c.clientHeight;
+	g.fillStyle = "#121218";
+	g.fillRect(0, 0, c.width, c.height);
+	if (!S.res || !S.res.matches.length) return;
+	const b = bounds();
+	const sx = c.width / (b.x1 - b.x0), sz = c.height / (b.z1 - b.z0);
+	const s = Math.min(sx, sz);
+	const ox = (c.width - (b.x1 - b.x0) * s) / 2, oz = (c.height - (b.z1 - b.z0) * s) / 2;
+	g.fillStyle = "#7bb85f";
+	for (const m of S.res.matches)
+		g.fillRect(ox + (m[0] - b.x0) * s, oz + (m[1] - b.z0) * s, 2, 2);
+	if (S.sel >= 0) {
+		const m = S.res.matches[S.sel];
+		g.strokeStyle = "#fff";
+		g.strokeRect(ox + (m[0] - b.x0) * s - 3, oz + (m[1] - b.z0) * s - 3, 8, 8);
+	}
+	c.onclick = (ev) => {
+		const r = c.getBoundingClientRect();
+		let best = -1, bd = 1e9;
+		S.res.matches.forEach((m, i) => {
+			const dx = ox + (m[0] - b.x0) * s - (ev.clientX - r.left);
+			const dz = oz + (m[1] - b.z0) * s - (ev.clientY - r.top);
+			const d = dx * dx + dz * dz;
+			if (d < bd) { bd = d; best = i; }
+		});
+		if (best >= 0 && bd < 400) {
+			select(best, true);
+			$("rows").children[best].scrollIntoView({ block: "nearest" });
+		}
+	};
+}
+
+/* ---- bedrock viewer ----------------------------------------------------
+ * One pixel per column, straight from a single-block search. ponytail: one
+ * fixed-size view refetched on pan -- add tiling only if it ever feels laggy. */
+
+let vImg = null, vAt = null, vTimer = null;
+
+/* Keep the backing store the same size as the CSS box, so one column is exactly
+ * `scale` device pixels. A fractional stretch makes pixelated upscaling produce
+ * visibly uneven blocks. */
+function vFit() {
+	const c = $("view"), w = Math.max(64, Math.floor(c.clientWidth));
+	if (c.width !== w) c.width = w;
+}
+function vDims() {
+	const c = $("view"), k = S.view.scale;
+	return { w: Math.min(512, Math.ceil(c.width / k)),
+	         h: Math.min(512, Math.ceil(c.height / k)) };
+}
+
+function vRefresh() {
+	const s = seedValue();
+	if (!s.n) return;
+	vFit();
+	const d = vDims();
+	const q = new URLSearchParams({ seed: s.n, y: S.view.y, x0: S.view.x0,
+	                                z0: S.view.z0, w: d.w, h: d.h });
+	const img = new Image();
+	img.onload = () => {
+		vImg = img;
+		vAt = { x0: S.view.x0, z0: S.view.z0, w: d.w, h: d.h };
+		vDraw();
+	};
+	img.src = "/api/view.png?" + q;
+}
+function vLater() { clearTimeout(vTimer); vTimer = setTimeout(vRefresh, 120); }
+
+function vDraw() {
+	const c = $("view"), g = c.getContext("2d"), k = S.view.scale;
+	g.imageSmoothingEnabled = false;
+	g.fillStyle = "#0b0b0e";
+	g.fillRect(0, 0, c.width, c.height);
+	if (vImg && vAt)
+		g.drawImage(vImg, (vAt.x0 - S.view.x0) * k, (vAt.z0 - S.view.z0) * k,
+		            vAt.w * k, vAt.h * k);
+
+	/* the pattern, drawn where the selected match puts it -- this is the whole
+	 * point of the viewer: see the formation, do not just trust the number */
+	if (S.res && S.sel >= 0) {
+		const m = S.res.matches[S.sel], L = S.layers.find((l) => l.y === S.view.y);
+		if (L) {
+			g.lineWidth = 1;
+			for (let z = 0; z < S.h; z++)
+				for (let x = 0; x < S.w; x++) {
+					const v = cellAt(L, x, z);
+					if (v === CARE) continue;
+					g.strokeStyle = v === WANT ? "#7bb85f" : "#c9564e";
+					g.strokeRect((m[0] + x - S.view.x0) * k + .5,
+					             (m[1] + z - S.view.z0) * k + .5, k - 1, k - 1);
+				}
+		}
+	}
+	const d = vDims();
+	$("vat").textContent = "x " + S.view.x0 + "…" + (S.view.x0 + d.w - 1)
+		+ "   z " + S.view.z0 + "…" + (S.view.z0 + d.h - 1) + "   " + k + "px/block";
+}
+
+(function viewerPan() {
+	const c = $("view");
+	let drag = null;
+	c.onpointerdown = (ev) => {
+		drag = { x: ev.clientX, y: ev.clientY, x0: S.view.x0, z0: S.view.z0 };
+		c.setPointerCapture(ev.pointerId);
+		c.classList.add("drag");
+	};
+	c.onpointermove = (ev) => {
+		if (!drag) return;
+		const k = S.view.scale * (c.clientWidth / c.width);
+		S.view.x0 = drag.x0 - Math.round((ev.clientX - drag.x) / k);
+		S.view.z0 = drag.z0 - Math.round((ev.clientY - drag.y) / k);
+		vDraw();
+		vLater();
+	};
+	c.onpointerup = () => { drag = null; c.classList.remove("drag"); };
+})();
+
+function renderVy() {
+	const sel = $("vy");
+	sel.innerHTML = "";
+	const ys = [...new Set([...S.layers.map((L) => L.y),
+		-64, -63, -62, -61, -60, 123, 124, 125, 126, 127, 128])].sort((a, b) => a - b);
+	for (const y of ys) {
+		const o = document.createElement("option");
+		o.value = y;
+		o.textContent = "y=" + y + "  (" + pLabel(y) + ")";
+		o.selected = y === S.view.y;
+		sel.appendChild(o);
+	}
+}
+
+/* ---- glue -------------------------------------------------------------- */
+
+function copy(t) { navigator.clipboard.writeText(t); }
+
+function renderArea() {
+	const b = bounds();
+	const w = b.x1 - b.x0, h = b.z1 - b.z0;
+	$("area").textContent = w > 0 && h > 0
+		? fmt(w) + " × " + fmt(h) + " = " + human(w * h) + " columns"
+		: "empty area";
+}
+
+function renderAll() {
+	renderTabs(); renderGrid(); renderArea(); renderEstimate(); renderCli(); renderVy();
+	save();
+}
+
+function save() {
+	try {
+		localStorage.setItem("gpbpf2", JSON.stringify({
+			seed: S.seedText, w: S.w, h: S.h, layers: S.layers, active: S.active,
+			b: bounds(), view: S.view,
+		}));
+	} catch (e) { /* private mode, quota -- losing autosave is not worth a dialog */ }
+}
+function load() {
+	let d;
+	try { d = JSON.parse(localStorage.getItem("gpbpf2") || "null"); } catch (e) { return false; }
+	if (!d || !d.layers || !d.layers.length) return false;
+	if (d.layers.some((L) => !Array.isArray(L.cells) || L.cells.length !== MAXW * MAXW))
+		return false;
+	S.seedText = d.seed; S.w = d.w; S.h = d.h; S.layers = d.layers;
+	S.active = Math.min(d.active || 0, d.layers.length - 1);
+	if (d.view) S.view = d.view;
+	$("seed").value = d.seed;
+	$("gw").value = S.w; $("gh").value = S.h;
+	if (d.b) { $("x0").value = d.b.x0; $("z0").value = d.b.z0; $("x1").value = d.b.x1; $("z1").value = d.b.z1; }
+	return true;
+}
+
+$("seed").oninput = (e) => {
+	S.seedText = e.target.value;
+	const s = seedValue();
+	$("seedout").textContent = s.n ? (s.how || "seed " + s.n) : s.how;
+	$("seedout").style.color = s.n ? "var(--dim)" : "var(--bad)";
+	renderCli(); save(); vRefresh();
+};
+for (const id of ["x0", "z0", "x1", "z1"])
+	$(id).oninput = () => { renderArea(); renderEstimate(); renderCli(); drawScatter(); save(); };
+for (const id of ["cx", "cz", "rad"])
+	$(id).oninput = () => {
+		const cx = numOf("cx"), cz = numOf("cz"), r = numOf("rad");
+		/* Half-typed input is not an instruction. Clearing the field to retype it
+		 * used to read as 0 and collapse the area to a point under the cursor. */
+		if (cx === null || cz === null || r === null) return;
+		const a = Math.abs(r);
+		$("x0").value = cx - a; $("z0").value = cz - a;
+		$("x1").value = cx + a; $("z1").value = cz + a;
+		renderArea(); renderEstimate(); renderCli(); drawScatter(); save();
+	};
+for (const id of ["gw", "gh"])
+	$(id).oninput = () => {
+		const w = numOf("gw"), h = numOf("gh");
+		if (w === null || h === null || w < 1 || h < 1 || w > MAXW || h > MAXW) return;
+		resize(w, h);
+		renderAll();
+	};
+$("clear").onclick = () => { setRegion(CARE); renderAll(); };
+$("fill").onclick = () => { setRegion(WANT); renderAll(); };
+$("addcustom").onclick = () => {
+	const y = +$("customy").value | 0;
+	if (Number.isFinite(y)) addLayer(y);
+};
+$("run").onclick = search;
+$("copycli").onclick = () => { const a = argv(); if (a) copy(a.join(" ")); };
+$("copyall").onclick = () => {
+	if (S.res) copy(S.res.matches.map((m) => m[0] + " " + m[1]).join("\n"));
+};
+$("dl").onclick = () => {
+	const b = reqBody(1);
+	delete b.limit;
+	location.href = "/api/download?q=" + encodeURIComponent(JSON.stringify(b));
+};
+$("vy").onchange = (e) => { S.view.y = +e.target.value; vRefresh(); save(); };
+$("zin").onclick = () => { S.view.scale = Math.min(24, S.view.scale + 2); vRefresh(); };
+$("zout").onclick = () => { S.view.scale = Math.max(2, S.view.scale - 2); vRefresh(); };
+addEventListener("resize", () => { drawScatter(); vLater(); });
+
+/* first run: the 3x3 plate from the README, so the page does something on open */
+if (!load()) {
+	S.layers = [{ y: -60, cells: newCells() }];
+	for (let z = 1; z <= 3; z++)
+		for (let x = 1; x <= 3; x++) S.layers[0].cells[z * MAXW + x] = WANT;
+}
+$("seed").dispatchEvent(new Event("input"));
+renderPicker();
+renderAll();
+drawScatter();
+vRefresh();
+</script>

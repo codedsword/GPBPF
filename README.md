@@ -5,7 +5,8 @@ GPU-Powered bedrock pattern finder.
 A C/CUDA port of [this fork](https://github.com/benitez-tomas/bedrock-pattern-finder)
 of [this project](https://github.com/Developer-Mike/minecraft-bedrock-generator)
 I found on reddit, with some improvements and CUDA GPU acceleration (hence the
-"GPU-Powered"). A web gui is comming soon
+"GPU-Powered"), plus a [web GUI](#web-gui) for drawing patterns instead of
+spelling them out as command-line arguments.
 
 It searches a rectangular area of a Minecraft world (1.18–1.21) for a bedrock
 pattern and prints every matching column. Output is **bit-exact** with the Java
@@ -49,6 +50,41 @@ gpbpf <worldSeed> <fromX> <fromZ> <toX> <toZ> [<block>...]
 
 ```sh
 gpbpf 12345 0 0 20000 20000 0,-60,0:1 1,-60,0:1 0,-60,1:1
+```
+
+## Web GUI
+
+```sh
+make web      # http://localhost:8765
+```
+
+Because typing 25 block arguments for a 5×5 pattern is not a good time. Draw the
+pattern on a grid instead, one tab per Y layer, and the page tells you how
+selective it is *before* you run anything:
+
+- **Expected match count, live.** Bedrock probability is fixed per layer (`−63`
+  is 80% bedrock, `−62` 60%, `−61` 40%, `−60` 20%, and the roof mirrors it), so
+  the expected number of hits is just the product of those over the area. A
+  pattern that would emit 12 GB of text says so while you are still drawing it,
+  and one that can never match — wanting bedrock at `y=-59`, say — says that too.
+- **A bedrock viewer.** Pan around the actual bedrock at any layer and see a
+  match with the pattern outlined on top of it, rather than taking a coordinate
+  on faith. It is a one-block search per frame, so it costs no new search code.
+- **The equivalent command**, always visible at the bottom, so the GUI doubles as
+  a command builder and never hides what it ran. Text seeds are converted the
+  same way Minecraft converts them (`String.hashCode`), since the CLI itself
+  takes only integers.
+
+Needs `python3` (stdlib only, no packages). `web/serve.py` shells out to the same
+`./gpbpf` binary this repo builds — **no C code is involved in serving**, so the
+GUI cannot affect parity. Run `make cuda` first if you want the GPU build behind
+it; both targets produce `./gpbpf`.
+
+It binds `127.0.0.1` and refuses searches that would match every column. `--host`
+exposes it to the network and warns when you use it.
+
+```sh
+make webtest  # server results must equal the CLI's, byte for byte
 ```
 
 ## Validation

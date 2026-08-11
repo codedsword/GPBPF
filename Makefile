@@ -26,7 +26,9 @@ endif
 PARITY := -ffp-contract=off
 LDLIBS := -lcrypto -lm
 
-.PHONY: all cuda test clean
+PORT ?= 8765
+
+.PHONY: all cuda test web webtest clean
 
 all: gpbpf
 
@@ -57,6 +59,15 @@ test: gpbpf fp_proof
 # before the parity harness is meaningful.
 fp_proof: tools/fp_proof.c bedrock.h
 	$(CC) $(CFLAGS) $(PARITY) -o $@ tools/fp_proof.c -lm
+
+# Web GUI. Serves web/index.html and shells out to this same binary, so it is
+# the CPU build unless you ran `make cuda` first (both produce ./gpbpf, and make
+# will not rebuild it if it is already newer than main.c).
+web: gpbpf
+	python3 web/serve.py --port $(PORT) --open
+
+webtest: gpbpf
+	python3 web/serve.py --selftest
 
 clean:
 	rm -f gpbpf fp_proof main.o search.o
