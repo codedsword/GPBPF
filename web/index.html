@@ -176,11 +176,30 @@ kbd {
 	padding: 0 .3rem; margin-left: .15rem;
 }
 
+/* Same sunken bevel and focus ring as the text inputs. The native arrow takes
+ * the OS palette and renders light grey on this panel, so appearance:none drops
+ * it and two gradients draw a chevron in --text instead -- the same trick the
+ * "not bedrock" cell uses for its cross, and it follows the theme for free. */
 select {
-	background: var(--sunk); color: var(--text); font: inherit;
-	border: 1px solid var(--edge); padding: .15rem;
+	background-color: var(--sunk); color: var(--text); font: inherit;
+	border: 2px solid; border-color: var(--lo) var(--hi) var(--hi) var(--lo);
+	padding: .3rem 1.5rem .3rem .55rem;
+	appearance: none;
+	background-image: linear-gradient(45deg, transparent 50%, var(--text) 50%),
+	                  linear-gradient(135deg, var(--text) 50%, transparent 50%);
+	background-position: right .85rem center, right .55rem center;
+	background-size: .3rem .3rem;
+	background-repeat: no-repeat;
 }
+select:focus { outline: 1px solid var(--accent); outline-offset: 1px; }
+/* the popup is drawn by the browser; these two are the parts it honours */
+option { background: var(--panel); color: var(--text); }
 .field select { flex: 1; min-width: 0; }
+/* the viewer's Y picker sits in a row of .sm buttons, so it matches those */
+.viewbar select {
+	padding: .15rem 1.3rem .15rem .4rem; font-size: .85rem;
+	background-position: right .7rem center, right .4rem center;
+}
 
 .est { margin-top: .6rem; padding: .5rem .6rem; background: var(--sunk); border-left: 3px solid var(--accent); }
 .est.warn { border-color: var(--warn); }
