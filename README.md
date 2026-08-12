@@ -2,15 +2,23 @@
 
 GPU-Powered bedrock pattern finder.
 
-A C/CUDA port of [this fork](https://github.com/benitez-tomas/bedrock-pattern-finder)
-of [this project](https://github.com/Developer-Mike/minecraft-bedrock-generator)
-I found on reddit, with some improvements and CUDA GPU acceleration (hence the
-"GPU-Powered"), plus a [web GUI](#web-gui) for drawing patterns instead of
+Searches a rectangular area of a Minecraft world (1.18–1.21) for a bedrock
+pattern and prints every matching column — 400 billion columns in 14 seconds on
+an RTX 3070. Comes with a [web GUI](#web-gui) for drawing patterns instead of
 spelling them out as command-line arguments.
 
-It searches a rectangular area of a Minecraft world (1.18–1.21) for a bedrock
-pattern and prints every matching column. Output is **bit-exact** with the Java
-original — see [Validation](#validation).
+It began as a C/CUDA port of [this fork](https://github.com/benitez-tomas/bedrock-pattern-finder)
+of [this project](https://github.com/Developer-Mike/minecraft-bedrock-generator)
+I found on reddit, and is developed as its own tool now rather than held in
+lockstep with the unmaintained original.
+
+The generator is the exception. The hash, the RNG stream, the seeding chain and
+the per-layer probabilities belong to Minecraft, not to this project — a pattern
+finder whose RNG has drifted reports coordinates that do not exist in anybody's
+world, and it does so silently. That part is checked against the Java
+implementation on every build; see [Validation](#validation). Everything around
+it — the interface, the output, the inherited warts — is ours to change, and
+[CONTRIBUTING.md](CONTRIBUTING.md) says how.
 
 ## Build
 
@@ -33,7 +41,8 @@ Requires `openssl-devel` (MD5, used once at startup for seed derivation).
 
 ## Usage
 
-Identical to the Java version:
+Argument-compatible with the Java original today, though the CLI is not
+frozen:
 
 ```sh
 gpbpf <worldSeed> <fromX> <fromZ> <toX> <toZ> [<block>...]
@@ -84,7 +93,7 @@ selective it is *before* you run anything:
 
 Needs `python3` (stdlib only, no packages). `web/serve.py` shells out to the same
 `./gpbpf` binary this repo builds — **no C code is involved in serving**, so the
-GUI cannot affect parity. Run `make cuda` first if you want the GPU build behind
+GUI cannot affect the generator. Run `make cuda` first if you want the GPU build behind
 it; both targets produce `./gpbpf`.
 
 It binds `127.0.0.1` and refuses searches that would match every column. `--host`
@@ -153,12 +162,19 @@ counted and the figure is exact, not estimated.
 make test     # runs ./fp_proof, then ./tools/verify.sh
 ```
 
-Runs the Java reference and `gpbpf` on identical inputs and diffs the match
-coordinates. 22 cases covering both probability bands, every band edge, the
-always-bedrock early returns, negative and past-wrap coordinates, extreme
-seeds, `pattern/*.txt` versus equivalent explicit block args, output ordering,
-and the distance field at extreme coordinates. All 22 pass bit-exact on both
-the CPU and CUDA builds.
+The Java implementation is the closest thing to an executable specification of
+Minecraft's bedrock RNG that runs offline, so it is the oracle the generator is
+regression-tested against. `verify.sh` runs both on identical inputs and diffs
+the match coordinates. 22 cases covering both probability bands, every band
+edge, the always-bedrock early returns, negative and past-wrap coordinates,
+extreme seeds, `pattern/*.txt` versus equivalent explicit block args, output
+ordering, and the distance field at extreme coordinates. All 22 pass byte for
+byte on both the CPU and CUDA builds.
+
+A failure means one of two things and they are not interchangeable: the
+generator drifted, which is a bug — or the interface changed on purpose, which
+is allowed, and the harness gets updated alongside it. See
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 Two cases exist to cover what the rest structurally cannot. The ordering case:
 every other case pipes both sides through `sort` before diffing, so they
@@ -174,9 +190,9 @@ run it. Guava's `Hashing.md5()`/`Longs.fromBytes` become `MessageDigest` MD5
 plus an explicit big-endian read (exact identities), and JLine's
 `terminal.getWidth()` becomes a constant. The reference repo is never modified.
 
-### Parity notes
+### Where the generator would silently drift
 
-Three details in `MathHelper.hashCode` diverge silently if ported naively, and
+Three details in `MathHelper.hashCode` diverge if reimplemented naively, and
 are the reason the harness tests coordinates past |x| ≈ 686:
 
 - `x * 3129871` is a **32-bit** multiply that wraps, then sign-extends. It is
@@ -356,7 +372,18 @@ with the formatting made that trade unnecessary.
   handled: Java's `(int)` narrowing clamps to `Integer.MAX_VALUE` while C's is
   undefined once the value exceeds `INT_MAX`, so `hypot_i` clamps to match.
 - A missing `pattern/` directory leaves the pattern empty, which matches every
-  column. This is the reference's behaviour, preserved deliberately.
+  column, so the CLI prints one line per column searched. Inherited from the
+  Java original and not yet changed; the web GUI already refuses it. This is
+  interface rather than generator, so it is fair game to fix — see
+  [CONTRIBUTING.md](CONTRIBUTING.md).
+- **Nether roof results are unverified.** The roof band runs the opposite way to
+  the floor — `y=123` solid, thinning *upward* to `y=127`, plus a second
+  always-bedrock layer at `y=128` — because `BedrockReader`'s enum passes the
+  band bounds in the opposite order for roof and floor. Nobody has checked
+  whether that matches vanilla or is a bug in the original, and confirming it
+  means comparing against the game rather than against the Java implementation,
+  which agrees with us by construction. Floor patterns (`y` −64…−59) are
+  unaffected.
 - A search spanning more than 2⁶³ columns is refused by the CUDA path and falls
   back to the CPU, because the flattened index would not fit in `long long`.
   Reaching it needs nearly the full int32 range on *both* axes; the CPU path is
