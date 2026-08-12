@@ -176,6 +176,12 @@ kbd {
 	padding: 0 .3rem; margin-left: .15rem;
 }
 
+/* overrides label's display:block -- this one is a checkbox caption, not a
+ * field label above an input */
+.opt { display: flex; align-items: center; gap: .4rem; margin: .6rem 0 0; color: var(--text); cursor: pointer; }
+.opt input { accent-color: var(--accent); margin: 0; }
+.opt small { color: var(--dim); }
+
 .est { margin-top: .6rem; padding: .5rem .6rem; background: var(--sunk); border-left: 3px solid var(--accent); }
 .est.warn { border-color: var(--warn); }
 .est.bad  { border-color: var(--bad); }
@@ -348,6 +354,11 @@ details pre { background: var(--sunk); padding: .55rem; overflow: auto; border: 
 			<span><i class="cell"></i>any <kbd>middle</kbd></span>
 		</div>
 
+		<label class="opt" for="rot">
+			<input type="checkbox" id="rot">
+			Match any rotation <small>— scans all four 90° turns</small>
+		</label>
+
 		<div class="est" id="est"></div>
 		<button class="go" id="run">Search</button>
 	</div>
@@ -363,7 +374,7 @@ details pre { background: var(--sunk); padding: .55rem; overflow: auto; border: 
 		<canvas id="scatter"></canvas>
 		<div class="tablewrap" style="margin-top:8px">
 			<table>
-				<thead><tr><th>X</th><th>Z</th><th>distance</th><th></th></tr></thead>
+				<thead><tr><th>X</th><th>Z</th><th>distance</th><th id="throt" class="hide">turn</th><th></th></tr></thead>
 				<tbody id="rows"></tbody>
 			</table>
 		</div>
@@ -441,6 +452,7 @@ const S = {
 	layers: [{ y: -60, cells: [] }],
 	active: 0,
 	w: 5, h: 5,
+	rot: false,
 	view: { y: -60, x0: -32, z0: -32, scale: 6 },
 	sample: null, sampleErr: false,
 	res: null, sel: -1,
@@ -489,16 +501,47 @@ function bounds() {
 	return { x0: g("x0"), z0: g("z0"), x1: g("x1"), z1: g("z1") };
 }
 
-function blocks() {
+/* r quarter turns clockwise about the pattern's own box: one turn sends
+ * (x, z) -> (h-1-z, x) and the box from w x h to h x w. Re-basing to zero like
+ * this keeps every offset non-negative, so a match coordinate still names the
+ * corner of the pattern and the viewer can draw it from there. */
+function rot(x, z, r) {
+	let w = S.w, h = S.h;
+	for (let i = r & 3; i > 0; i--) {
+		const nx = h - 1 - z;
+		z = x; x = nx;
+		const t = w; w = h; h = t;
+	}
+	return [x, z];
+}
+
+function blocks(r) {
 	const out = [];
 	for (const L of S.layers)
 		for (let z = 0; z < S.h; z++)
 			for (let x = 0; x < S.w; x++) {
 				const v = cellAt(L, x, z);
-				if (v !== CARE) out.push([x, L.y, z, v]);
+				if (v === CARE) continue;
+				const p = rot(x, z, r || 0);
+				out.push([p[0], L.y, p[1], v]);
 			}
 	return out;
 }
+
+/* One scan per orientation. A pattern that maps onto itself under a turn --
+ * anything with rotational symmetry, and every 1x1 -- is dropped here instead
+ * of scanned twice, which would otherwise report its matches two or four times
+ * over. The binary ignores block order, so a sorted join identifies a set. */
+function patterns() {
+	const seen = new Map();
+	for (let r = 0; r < (S.rot ? 4 : 1); r++) {
+		const b = blocks(r), k = String([...b].sort());
+		if (!seen.has(k)) seen.set(k, { r, b });
+	}
+	return [...seen.values()];
+}
+const TURN = ["0°", "90°", "180°", "270°"];
+const turnOf = (m) => (S.res && S.res.turns ? S.res.turns[m[3]] : 0) || 0;
 
 /* ---- estimate ---------------------------------------------------------- */
 
@@ -521,7 +564,7 @@ function bytes(n) {
  * so its draw comes from a distinct RNG stream and the factors are independent.
  * Free, and it is the whole defence against a search that emits 12 GB of text. */
 function estimate() {
-	const b = blocks(), bd = bounds();
+	const b = blocks(), bd = bounds(), np = patterns().length;
 	const w = Math.max(0, bd.x1 - bd.x0), h = Math.max(0, bd.z1 - bd.z0);
 	const area = w * h;
 	let p = 1, dead = null;
@@ -531,7 +574,9 @@ function estimate() {
 			dead = "y=" + y + " is " + (pOf(y) ? "always" : "never") + " bedrock, but the pattern wants the opposite";
 		p *= q;
 	}
-	return { area, w, h, p, n: area * p, blocks: b.length, dead,
+	/* np scans of the same area, and a turn changes neither the Y levels nor
+	 * the wants, so the per-scan odds are the same and the count just scales */
+	return { area, w, h, p, np, n: area * p * np, blocks: b.length, dead,
 	         layers: new Set(b.map((k) => k[1])).size };
 }
 
@@ -573,6 +618,8 @@ async function runSample() {
 function renderEstimate() {
 	const e = estimate(), el = $("est"), s = S.sample;
 	const dims = fmt(e.w) + "\u00d7" + fmt(e.h) + " = " + human(e.area) + " columns";
+	const bl = e.blocks + " blocks"
+		+ (e.np > 1 ? " \u00d7 " + e.np + " orientations" : "");
 	el.className = "est";
 	if (!e.area) {
 		el.className = "est bad";
@@ -587,18 +634,18 @@ function renderEstimate() {
 		el.innerHTML = "<b>No matches possible</b><div class='why'>" + e.dead + ".</div>";
 	} else if (s && s.exact) {
 		el.innerHTML = "<b>" + fmt(s.hits) + " matches</b> <span class='why'>exact · ~"
-			+ bytes(s.hits * 34) + "</span><div class='why'>" + e.blocks
-			+ " blocks · counted every one of " + dims + "</div>";
+			+ bytes(s.hits * 34) + "</span><div class='why'>" + bl
+			+ " · counted every one of " + dims + "</div>";
 	} else if (s && s.hits) {
 		if (s.expected > 200000) el.className = "est warn";
 		el.innerHTML = "<b>\u2248 " + human(s.expected) + " matches</b> <span class='why'>"
 			+ "measured · ~" + bytes(s.expected * 34) + "</span><div class='why'>"
-			+ e.blocks + " blocks · " + fmt(s.hits) + " hits in " + human(s.sampled)
+			+ bl + " · " + fmt(s.hits) + " hits in " + human(s.sampled)
 			+ " sampled columns \u2192 " + human(s.lo) + "\u2013" + human(s.hi)
 			+ " over " + dims + "</div>";
 	} else if (s) {
 		el.innerHTML = "<b>under " + human(s.hi) + " matches</b> <span class='why'>"
-			+ "measured</span><div class='why'>" + e.blocks + " blocks · no hits in "
+			+ "measured</span><div class='why'>" + bl + " · no hits in "
 			+ human(s.sampled) + " sampled columns, so this is a 95% upper bound "
 			+ "over " + dims + "</div>";
 	} else {
@@ -607,7 +654,7 @@ function renderEstimate() {
 		el.innerHTML = "<b>\u2248 " + human(e.n) + " matches</b> <span class='why'>"
 			+ (S.sampleErr ? "estimated" : "estimating\u2026") + " · ~"
 			+ bytes(e.n * 34) + "</span><div class='why'>"
-			+ e.blocks + " blocks · 1 in " + human(1 / e.p) + " · " + dims
+			+ bl + " · 1 in " + human(1 / e.p) + " · " + dims
 			+ (e.layers > 1 ? " · assumes layers are independent, which they are not"
 			                : "") + "</div>";
 	}
@@ -741,30 +788,41 @@ $("grid").onauxclick = (ev) => ev.preventDefault();
 
 /* ---- command + pattern files ------------------------------------------ */
 
-function argv() {
+/* One command line per orientation -- the binary takes one pattern per run, so
+ * "any rotation" is genuinely four invocations at the CLI too. */
+function argvs() {
 	const s = seedValue(), b = bounds();
 	if (!s.n) return null;
-	return ["./gpbpf", s.n, String(b.x0), String(b.z0), String(b.x1), String(b.z1)]
-		.concat(blocks().map(([x, y, z, w]) => x + "," + y + "," + z + ":" + w));
+	return patterns().map((p) =>
+		["./gpbpf", s.n, String(b.x0), String(b.z0), String(b.x1), String(b.z1)]
+			.concat(p.b.map(([x, y, z, w]) => x + "," + y + "," + z + ":" + w)));
 }
 function renderCli() {
-	const a = argv();
-	$("cli").textContent = a ? a.join(" ") : "(fix the seed first)";
+	const a = argvs();
+	$("cli").textContent = a ? a.map((c) => c.join(" ")).join("\n") : "(fix the seed first)";
 	const t = $("txt");
 	t.innerHTML = "";
-	for (const L of S.layers) {
-		let s = "";
-		for (let z = 0; z < S.h; z++) {
-			for (let x = 0; x < S.w; x++) {
-				const v = cellAt(L, x, z);
-				s += v === WANT ? "1" : v === WANT_NOT ? "0" : " ";
+	const ps = patterns();
+	for (const p of ps) {
+		/* rebuilt from the rotated block list rather than re-rotating here, so
+		 * these files are literally what the search above was handed */
+		const at = new Map(p.b.map(([x, y, z, v]) => [x + "," + y + "," + z, v]));
+		const w = p.r & 1 ? S.h : S.w, h = p.r & 1 ? S.w : S.h;
+		for (const L of S.layers) {
+			let s = "";
+			for (let z = 0; z < h; z++) {
+				for (let x = 0; x < w; x++) {
+					const v = at.get(x + "," + L.y + "," + z);
+					s += v === WANT ? "1" : v === WANT_NOT ? "0" : " ";
+				}
+				s += "\n";
 			}
-			s += "\n";
+			const d = document.createElement("div");
+			d.innerHTML = "<div class='why' style='color:var(--dim);margin-top:6px'>"
+				+ (ps.length > 1 ? "turned " + TURN[p.r] + " — " : "") + "pattern/"
+				+ L.y + ".txt</div><pre>" + s.replace(/</g, "&lt;") + "</pre>";
+			t.appendChild(d);
 		}
-		const d = document.createElement("div");
-		d.innerHTML = "<div class='why' style='color:var(--dim);margin-top:6px'>pattern/"
-			+ L.y + ".txt</div><pre>" + s.replace(/</g, "&lt;") + "</pre>";
-		t.appendChild(d);
 	}
 }
 
@@ -773,7 +831,7 @@ function renderCli() {
 function reqBody(limit) {
 	const s = seedValue(), b = bounds();
 	return { seed: s.n, fromX: b.x0, fromZ: b.z0, toX: b.x1, toZ: b.z1,
-	         blocks: blocks(), limit };
+	         patterns: patterns().map((p) => p.b), limit };
 }
 
 /* The search is one blocking request that can run for tens of seconds over a
@@ -810,6 +868,9 @@ async function search() {
 		const d = await r.json();
 		if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
 		S.res = d;
+		/* which turn each pattern index was, frozen with the result: the grid
+		 * can be edited afterwards, the matches on screen cannot */
+		S.res.turns = patterns().map((p) => p.r);
 		S.sel = -1;
 		renderResults();
 		modal("Done", "<b>" + fmt(d.count) + "</b> match" + (d.count === 1 ? "" : "es")
@@ -843,11 +904,13 @@ function renderResults() {
 			+ fmt(d.count) + ". Use <b>download all</b> for the rest.</div>";
 	$("rbanner").innerHTML = ban;
 
-	const tb = $("rows");
+	const tb = $("rows"), multi = d.turns.length > 1;
+	$("throt").classList.toggle("hide", !multi);
 	tb.innerHTML = "";
 	d.matches.forEach((m, i) => {
 		const tr = document.createElement("tr");
 		tr.innerHTML = "<td>" + m[0] + "</td><td>" + m[1] + "</td><td>" + fmt(m[2]) + "</td>"
+			+ "<td class='" + (multi ? "" : "hide") + "'>" + TURN[turnOf(m)] + "</td>"
 			+ "<td><button class='sm'>/tp</button></td>";
 		tr.onclick = () => select(i, true);
 		tr.querySelector("button").onclick = (ev) => {
@@ -959,17 +1022,15 @@ function vDraw() {
 	/* the pattern, drawn where the selected match puts it -- this is the whole
 	 * point of the viewer: see the formation, do not just trust the number */
 	if (S.res && S.sel >= 0) {
-		const m = S.res.matches[S.sel], L = S.layers.find((l) => l.y === S.view.y);
-		if (L) {
-			g.lineWidth = 1;
-			for (let z = 0; z < S.h; z++)
-				for (let x = 0; x < S.w; x++) {
-					const v = cellAt(L, x, z);
-					if (v === CARE) continue;
-					g.strokeStyle = v === WANT ? "#7bb85f" : "#c9564e";
-					g.strokeRect((m[0] + x - S.view.x0) * k + .5,
-					             (m[1] + z - S.view.z0) * k + .5, k - 1, k - 1);
-				}
+		const m = S.res.matches[S.sel];
+		g.lineWidth = 1;
+		/* the same rotated list the search was given, not the drawn grid, so the
+		 * outline can never disagree with the orientation that hit */
+		for (const [x, y, z, v] of blocks(turnOf(m))) {
+			if (y !== S.view.y) continue;
+			g.strokeStyle = v === WANT ? "#7bb85f" : "#c9564e";
+			g.strokeRect((m[0] + x - S.view.x0) * k + .5,
+			             (m[1] + z - S.view.z0) * k + .5, k - 1, k - 1);
 		}
 	}
 	const d = vDims();
@@ -1024,7 +1085,7 @@ function save() {
 	try {
 		localStorage.setItem("gpbpf2", JSON.stringify({
 			seed: S.seedText, w: S.w, h: S.h, layers: S.layers, active: S.active,
-			b: bounds(), view: S.view,
+			rot: S.rot, b: bounds(), view: S.view,
 		}));
 	} catch (e) { /* private mode, quota -- losing autosave is not worth a dialog */ }
 }
@@ -1036,8 +1097,10 @@ function load() {
 		return false;
 	S.seedText = d.seed; S.w = d.w; S.h = d.h; S.layers = d.layers;
 	S.active = Math.min(d.active || 0, d.layers.length - 1);
+	S.rot = !!d.rot;
 	if (d.view) S.view = d.view;
 	$("seed").value = d.seed;
+	$("rot").checked = S.rot;
 	$("gw").value = S.w; $("gh").value = S.h;
 	if (d.b) { $("x0").value = d.b.x0; $("z0").value = d.b.z0; $("x1").value = d.b.x1; $("z1").value = d.b.z1; }
 	return true;
@@ -1078,8 +1141,12 @@ $("addcustom").onclick = () => {
 	const y = +$("customy").value | 0;
 	if (Number.isFinite(y)) addLayer(y);
 };
+$("rot").onchange = () => { S.rot = $("rot").checked; renderAll(); };
 $("run").onclick = search;
-$("copycli").onclick = () => { const a = argv(); if (a) copy(a.join(" ")); };
+$("copycli").onclick = () => {
+	const a = argvs();
+	if (a) copy(a.map((c) => c.join(" ")).join("\n"));
+};
 $("copyall").onclick = () => {
 	if (S.res) copy(S.res.matches.map((m) => m[0] + " " + m[1]).join("\n"));
 };

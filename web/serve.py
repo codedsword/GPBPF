@@ -34,6 +34,9 @@ INT64_MIN, INT64_MAX = -(2 ** 63), 2 ** 63 - 1
 
 # search.cu MAX_PATTERN -- the CUDA constant bank holds 2048 blocks.
 MAX_BLOCKS = 2048
+# One scan per pattern, so this multiplies the cost of every request. The GUI
+# sends at most the four rotations of one drawing.
+MAX_PATTERNS = 4
 # Bound one viewer request. 512*512 columns is ~1 ms of actual search.
 MAX_VIEW = 512
 MAX_BODY = 1 << 20
@@ -65,7 +68,9 @@ def as_int(v, lo, hi, name):
 
 
 def parse_search(d, cfg):
-    """Request dict -> (argv, area). Everything past here is integers only."""
+    """Request dict -> (argvs, area). One argv per pattern, all over the same
+    area: the GUI sends the four rotations of a drawing that way. Everything
+    past here is integers only."""
     seed = as_int(d.get("seed"), INT64_MIN, INT64_MAX, "seed")
     x0 = as_int(d.get("fromX"), INT32_MIN, INT32_MAX, "fromX")
     z0 = as_int(d.get("fromZ"), INT32_MIN, INT32_MAX, "fromZ")
@@ -81,38 +86,50 @@ def parse_search(d, cfg):
         raise BadRequest("area is %d columns, limit is %d (raise with --max-area)"
                          % (area, cfg.max_area))
 
-    blocks = d.get("blocks")
-    if not isinstance(blocks, list):
-        raise BadRequest("blocks: expected a list")
-    # An empty pattern makes checkFormation vacuously true, so the binary would
-    # emit one line per column. Reference behaviour (main.c:154), still a trap.
-    if not blocks:
-        raise BadRequest("pattern is empty: every column would match")
-    if len(blocks) > MAX_BLOCKS:
-        raise BadRequest("pattern has %d blocks, the CUDA limit is %d"
-                         % (len(blocks), MAX_BLOCKS))
+    pats = d.get("patterns")
+    if pats is None:
+        pats = [d.get("blocks")]
+    if not isinstance(pats, list) or not pats:
+        raise BadRequest("patterns: expected a non-empty list")
+    if len(pats) > MAX_PATTERNS:
+        raise BadRequest("%d patterns, the limit is %d" % (len(pats), MAX_PATTERNS))
 
-    args, lo_dx, hi_dx, lo_dz, hi_dz = [], 0, 0, 0, 0
-    for b in blocks:
-        if not isinstance(b, (list, tuple)) or len(b) != 4:
-            raise BadRequest("block: expected [dx, y, dz, 0|1]")
-        dx = as_int(b[0], INT32_MIN, INT32_MAX, "block dx")
-        y = as_int(b[1], INT32_MIN, INT32_MAX, "block y")
-        dz = as_int(b[2], INT32_MIN, INT32_MAX, "block dz")
-        want = as_int(b[3], 0, 1, "block value")
-        lo_dx, hi_dx = min(lo_dx, dx), max(hi_dx, dx)
-        lo_dz, hi_dz = min(lo_dz, dz), max(hi_dz, dz)
-        args.append("%d,%d,%d:%d" % (dx, y, dz, want))
+    argvs = []
+    for blocks in pats:
+        if not isinstance(blocks, list):
+            raise BadRequest("blocks: expected a list")
+        # An empty pattern makes checkFormation vacuously true, so the binary
+        # would emit one line per column. Reference behaviour (main.c:154),
+        # still a trap.
+        if not blocks:
+            raise BadRequest("pattern is empty: every column would match")
+        if len(blocks) > MAX_BLOCKS:
+            raise BadRequest("pattern has %d blocks, the CUDA limit is %d"
+                             % (len(blocks), MAX_BLOCKS))
 
-    # bd_hash() adds the offset to the column coordinate in int32. Java wraps
-    # there; C is undefined, so keep the sum in range rather than find out.
-    if not (INT32_MIN <= x0 + lo_dx and x1 - 1 + hi_dx <= INT32_MAX):
-        raise BadRequest("search range plus pattern offset overflows X")
-    if not (INT32_MIN <= z0 + lo_dz and z1 - 1 + hi_dz <= INT32_MAX):
-        raise BadRequest("search range plus pattern offset overflows Z")
+        args, lo_dx, hi_dx, lo_dz, hi_dz = [], 0, 0, 0, 0
+        for b in blocks:
+            if not isinstance(b, (list, tuple)) or len(b) != 4:
+                raise BadRequest("block: expected [dx, y, dz, 0|1]")
+            dx = as_int(b[0], INT32_MIN, INT32_MAX, "block dx")
+            y = as_int(b[1], INT32_MIN, INT32_MAX, "block y")
+            dz = as_int(b[2], INT32_MIN, INT32_MAX, "block dz")
+            want = as_int(b[3], 0, 1, "block value")
+            lo_dx, hi_dx = min(lo_dx, dx), max(hi_dx, dx)
+            lo_dz, hi_dz = min(lo_dz, dz), max(hi_dz, dz)
+            args.append("%d,%d,%d:%d" % (dx, y, dz, want))
 
-    argv = [cfg.binary, str(seed), str(x0), str(z0), str(x1), str(z1)] + args
-    return argv, area
+        # bd_hash() adds the offset to the column coordinate in int32. Java
+        # wraps there; C is undefined, so keep the sum in range rather than
+        # find out.
+        if not (INT32_MIN <= x0 + lo_dx and x1 - 1 + hi_dx <= INT32_MAX):
+            raise BadRequest("search range plus pattern offset overflows X")
+        if not (INT32_MIN <= z0 + lo_dz and z1 - 1 + hi_dz <= INT32_MAX):
+            raise BadRequest("search range plus pattern offset overflows Z")
+
+        argvs.append([cfg.binary, str(seed), str(x0), str(z0), str(x1),
+                      str(z1)] + args)
+    return argvs, area
 
 
 def spawn(argv, cfg):
@@ -198,10 +215,10 @@ def render_view(q, cfg):
     if x0 + w > INT32_MAX or z0 + h > INT32_MAX:
         raise BadRequest("view rectangle runs past the world edge")
 
-    argv, _ = parse_search({"seed": q.get("seed"), "fromX": x0, "fromZ": z0,
-                            "toX": x0 + w, "toZ": z0 + h,
-                            "blocks": [[0, y, 0, 1]]}, cfg)
-    matches, _, _, _ = run_search(argv, cfg, w * h)
+    argvs, _ = parse_search({"seed": q.get("seed"), "fromX": x0, "fromZ": z0,
+                             "toX": x0 + w, "toZ": z0 + h,
+                             "blocks": [[0, y, 0, 1]]}, cfg)
+    matches, _, _, _ = run_search(argvs[0], cfg, w * h)
 
     px = bytearray(w * h * 2)  # zero-filled == fully transparent
     for x, z, _ in matches:
@@ -246,12 +263,17 @@ def sample_rect(x0, z0, w, h, budget):
     return x0 + (w - sw) // 2, z0, sw, h
 
 
-def sample_rate(argv, cfg, x0, z0, w, h, area):
+def sample_rate(argvs, cfg, x0, z0, w, h, area):
     """Measure the real match rate on a sub-rectangle of the search.
 
     Multiplying the per-layer probabilities assumes the blocks are independent,
     which they are not across Y -- measured 47x low at four layers. Counting
     actual hits is exact by construction and needs no model at all.
+
+    Every pattern is sampled over the same rectangle and the hits are summed,
+    so a four-orientation search is estimated the same way its own count is
+    tallied. Rotations are not free of each other either -- another reason to
+    count rather than multiply a single scan by four.
 
     Two stages, because the output has to stay bounded: a permissive pattern
     reaches SAMPLE_MIN_HITS on the small first sample and stops there, and one
@@ -260,8 +282,12 @@ def sample_rate(argv, cfg, x0, z0, w, h, area):
     """
     def once(budget):
         sx, sz, sw, sh = sample_rect(x0, z0, w, h, budget)
-        a = argv[:2] + [str(sx), str(sz), str(sx + sw), str(sz + sh)] + argv[6:]
-        _, hits, _, warn = run_search(a, cfg, 1)
+        hits, warn = 0, []
+        for argv in argvs:
+            a = argv[:2] + [str(sx), str(sz), str(sx + sw), str(sz + sh)] + argv[6:]
+            _, n, _, ws = run_search(a, cfg, 1)
+            hits += n
+            warn += [s for s in ws if s not in warn]
         return sw * sh, hits, warn
 
     n, hits, warn = once(min(SAMPLE_STAGE1, area))
@@ -335,10 +361,10 @@ def make_handler(cfg):
         def _estimate(self, raw):
             """Expected match count, measured rather than modelled."""
             d = self._body(raw)
-            argv, area = parse_search(d, cfg)
-            x0, z0, x1, z1 = (int(v) for v in argv[2:6])
+            argvs, area = parse_search(d, cfg)
+            x0, z0, x1, z1 = (int(v) for v in argvs[0][2:6])
             t0 = time.monotonic()
-            n, hits, warn = sample_rate(argv, cfg, x0, z0, x1 - x0, z1 - z0, area)
+            n, hits, warn = sample_rate(argvs, cfg, x0, z0, x1 - x0, z1 - z0, area)
             rate = hits / float(n)
             exp = rate * area
             if hits:  # Poisson interval on the observed count
@@ -363,11 +389,23 @@ def make_handler(cfg):
         def _search(self, raw):
             d = self._body(raw)
             limit = as_int(d.get("limit", 5000), 1, 200000, "limit")
-            argv, area = parse_search(d, cfg)
-            matches, count, elapsed, warnings = run_search(argv, cfg, limit)
+            argvs, area = parse_search(d, cfg)
+            matches, count, elapsed, warnings = [], 0, 0.0, []
+            for i, argv in enumerate(argvs):
+                ms, c, el, warn = run_search(argv, cfg, limit)
+                # tagged with which pattern hit, so the page can draw the match
+                # in the orientation that actually matched
+                matches += [m + [i] for m in ms]
+                count += c
+                elapsed += el
+                warnings += [s for s in warn if s not in warnings]
+            # each scan comes back x-major/z-minor; merge back into that order
+            # so the joined list reads like a single scan's does
+            matches.sort()
+            del matches[limit:]
             self._json(200, {"count": count, "area": area, "elapsed": elapsed,
                              "matches": matches, "truncated": count > len(matches),
-                             "warnings": warnings, "command": argv})
+                             "warnings": warnings, "command": argvs})
 
         def _download(self, q):
             """Re-runs the search and streams stdout straight through. The search
@@ -378,10 +416,9 @@ def make_handler(cfg):
                 raise BadRequest("q is not valid JSON")
             if not isinstance(d, dict):
                 raise BadRequest("q must be an object")
-            argv, _ = parse_search(d, cfg)
-            name = "gpbpf-%s-%s_%s-%s_%s.txt" % tuple(argv[1:6])
+            argvs, _ = parse_search(d, cfg)
+            name = "gpbpf-%s-%s_%s-%s_%s.txt" % tuple(argvs[0][1:6])
 
-            p, killer, _err, _t = spawn(argv, cfg)
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Disposition", 'attachment; filename="%s"' % name)
@@ -389,18 +426,22 @@ def make_handler(cfg):
             self.send_header("Connection", "close")
             self.end_headers()
             self.close_connection = True
-            try:
-                while True:
-                    chunk = p.stdout.read1(1 << 20)
-                    if not chunk:
-                        break
-                    self.wfile.write(chunk)
-            finally:
-                killer.cancel()
-                p.kill()  # no-op if it already exited; stops it on disconnect
-                p.stdout.close()
-                p.stderr.close()
-                p.wait()
+            # One scan per orientation, back to back. Each ends with the
+            # binary's own "search finished", which delimits them.
+            for argv in argvs:
+                p, killer, _err, _t = spawn(argv, cfg)
+                try:
+                    while True:
+                        chunk = p.stdout.read1(1 << 20)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                finally:
+                    killer.cancel()
+                    p.kill()  # no-op if it already exited; stops it on disconnect
+                    p.stdout.close()
+                    p.stderr.close()
+                    p.wait()
 
     return Handler
 
@@ -483,7 +524,34 @@ def selftest(cfg):
                     "toX": INT32_MAX, "toZ": 4, "blocks": [[5, -60, 0, 1]]})
     check("pattern offset past INT32_MAX rejected", code == 400)
 
-    # 6. the measured estimate. The point of it is the multi-layer case, where
+    # 6. multi-pattern: the page sends the four rotations of one drawing as four
+    #    patterns, and the merge has to be exactly the four scans run one at a
+    #    time -- same total, same order, each match tagged with which one hit.
+    #    The four below are the quarter turns of a 3x2 L, written out rather
+    #    than computed, so they also pin the convention the page rotates by:
+    #    (x,z) -> (h-1-z, x), re-based so no offset goes negative.
+    turns = [[[0, -60, 0, 1], [1, -60, 0, 1], [2, -60, 0, 1], [0, -60, 1, 1]],
+             [[1, -60, 0, 1], [1, -60, 1, 1], [1, -60, 2, 1], [0, -60, 0, 1]],
+             [[2, -60, 0, 1], [0, -60, 1, 1], [1, -60, 1, 1], [2, -60, 1, 1]],
+             [[0, -60, 0, 1], [0, -60, 1, 1], [0, -60, 2, 1], [1, -60, 2, 1]]]
+    got, code = post({"seed": 12345, "fromX": 0, "fromZ": 0, "toX": 3000,
+                      "toZ": 3000, "patterns": turns, "limit": 200000})
+    union = []
+    for i, t in enumerate(turns):
+        one = subprocess.run([cfg.binary, "12345", "0", "0", "3000", "3000"]
+                             + ["%d,%d,%d:%d" % tuple(b) for b in t],
+                             cwd=ROOT, capture_output=True)
+        union += [[int(a), int(b), i] for a, b in
+                  re.findall(r"@(-?\d+);(-?\d+)", one.stdout.decode())]
+    union.sort()
+    check("4 orientations == 4 separate runs (%d matches)" % len(union),
+          code == 200 and union and got["count"] == len(union)
+          and sorted([m[0], m[1], m[3]] for m in got["matches"]) == union)
+    _, code = post({"seed": 1, "fromX": 0, "fromZ": 0, "toX": 10, "toZ": 10,
+                    "patterns": turns * 2})
+    check("too many patterns rejected", code == 400)
+
+    # 7. the measured estimate. The point of it is the multi-layer case, where
     #    multiplying per-layer probabilities is 3.6x low, so check the sampled
     #    interval actually brackets the true count from a full search.
     def est(body):

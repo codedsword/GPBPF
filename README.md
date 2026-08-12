@@ -82,6 +82,12 @@ selective it is *before* you run anything:
   never match — wanting bedrock at `y=-59`, say — says that too. Measuring
   rather than modelling is not gold-plating; see
   [Layers are not independent](#layers-are-not-independent).
+- **Match any rotation.** A pattern copied off a screenshot or a video comes
+  with no reliable orientation, so the toggle scans all four quarter turns
+  instead of one — four runs of the binary, merged, each match labelled with the
+  turn that hit and drawn in the viewer at that turn. A pattern that maps onto
+  itself under a turn is scanned once, not two or four times, so a symmetric
+  drawing does not report every match twice over.
 - **A bedrock viewer.** Pan around the actual bedrock at any layer and see a
   match with the pattern outlined on top of it, rather than taking a coordinate
   on faith. It is a one-block search per frame, so it costs no new search code.
