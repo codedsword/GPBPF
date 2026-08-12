@@ -1,5 +1,5 @@
 /* GPBPF - GPU bedrock pattern finder.
- * Drop-in replacement for bedrock-pattern-finder's Main:
+ *
  *   gpbpf <worldSeed> <fromX> <fromZ> <toX> <toZ> [<block>...]
  */
 #define _POSIX_C_SOURCE 200809L

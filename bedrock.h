@@ -1,9 +1,12 @@
-/* Bit-exact C port of the Minecraft 1.18-1.21 bedrock RNG.
+/* Minecraft 1.18-1.21 bedrock generator.
  *
- * Mirrors com.mike.extracted.Xoroshiro128PlusPlusRandom, MathHelper and
- * BedrockReader.isBedrock from bedrock-pattern-finder. Every probe here is a
- * pure function of (deriver, x, y, z): no RNG state is carried between calls,
- * which is what makes the search trivially parallel.
+ * This chain belongs to the game, not to this project: xoroshiro128++, the
+ * splitmix64 seeding, the hash, and the per-layer probability bands. The
+ * semantics are fixed; only the implementation is ours. tools/vectors.json
+ * pins the output, so a change here that alters results is a bug.
+ *
+ * Every probe is a pure function of (deriver, x, y, z) -- no RNG state is
+ * carried between calls, which is what makes the search trivially parallel.
  *
  * Included by both main.c (gcc) and search.cu (nvcc).
  */

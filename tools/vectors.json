@@ -1,0 +1,289 @@
+{
+ "provenance": {
+  "recorded": "2026-08-12",
+  "how": "Captured from a build that passed the 22-case cross-check against the Java implementation these vectors originally came from, at reference commit 726af429711759e41a32111b33e6c1327f025838. That harness has since been removed: the generator is pinned by these vectors now, and the project no longer depends on the original to build or test.",
+  "warning": "A diff against these is a bug in this repo. Do not re-record to make a red gate green -- see the header of tools/check.py."
+ },
+ "cases": {
+  "single probabilistic block": {
+   "mode": "sorted",
+   "args": [
+    "12345",
+    "0",
+    "0",
+    "40",
+    "40",
+    "0,-60,0:1"
+   ],
+   "matches": 355,
+   "sha256": "43ab60c480f5bde7f51327ea8bf64df24750ef468a1e0623c406ca0e6dfc1ff3"
+  },
+  "multi-block early exit": {
+   "mode": "sorted",
+   "args": [
+    "12345",
+    "0",
+    "0",
+    "200",
+    "200",
+    "0,-60,0:1",
+    "1,-60,0:1",
+    "0,-60,1:1"
+   ],
+   "matches": 339,
+   "sha256": "0ae81551cefc2830c46dd30a6880d9e51797236e567c07dc2a1dc5aca2474062"
+  },
+  "y=-64 always bedrock": {
+   "mode": "sorted",
+   "args": [
+    "12345",
+    "0",
+    "0",
+    "30",
+    "30",
+    "0,-64,0:1"
+   ],
+   "matches": 900,
+   "sha256": "08d67145d9df59a0ec33d701f5865d53d10cf455e39545bd4b1250d2896cf864"
+  },
+  "y=-64 wanted absent (no match)": {
+   "mode": "sorted",
+   "args": [
+    "12345",
+    "0",
+    "0",
+    "30",
+    "30",
+    "0,-64,0:0"
+   ],
+   "matches": 0,
+   "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "y=128 roof always bedrock": {
+   "mode": "sorted",
+   "args": [
+    "12345",
+    "0",
+    "0",
+    "30",
+    "30",
+    "0,128,0:1"
+   ],
+   "matches": 900,
+   "sha256": "08d67145d9df59a0ec33d701f5865d53d10cf455e39545bd4b1250d2896cf864"
+  },
+  "y=-59 p=0.0 band edge": {
+   "mode": "sorted",
+   "args": [
+    "12345",
+    "0",
+    "0",
+    "30",
+    "30",
+    "0,-59,0:0"
+   ],
+   "matches": 900,
+   "sha256": "08d67145d9df59a0ec33d701f5865d53d10cf455e39545bd4b1250d2896cf864"
+  },
+  "y=123 p=1.0 band edge": {
+   "mode": "sorted",
+   "args": [
+    "12345",
+    "0",
+    "0",
+    "30",
+    "30",
+    "0,123,0:1"
+   ],
+   "matches": 900,
+   "sha256": "08d67145d9df59a0ec33d701f5865d53d10cf455e39545bd4b1250d2896cf864"
+  },
+  "y=-65 below floor band (p=1.2)": {
+   "mode": "sorted",
+   "args": [
+    "12345",
+    "0",
+    "0",
+    "30",
+    "30",
+    "0,-65,0:1"
+   ],
+   "matches": 900,
+   "sha256": "08d67145d9df59a0ec33d701f5865d53d10cf455e39545bd4b1250d2896cf864"
+  },
+  "y=129 above roof band (p=-0.2)": {
+   "mode": "sorted",
+   "args": [
+    "12345",
+    "0",
+    "0",
+    "30",
+    "30",
+    "0,129,0:0"
+   ],
+   "matches": 900,
+   "sha256": "08d67145d9df59a0ec33d701f5865d53d10cf455e39545bd4b1250d2896cf864"
+  },
+  "y=0 dead zone below roof band": {
+   "mode": "sorted",
+   "args": [
+    "12345",
+    "0",
+    "0",
+    "30",
+    "30",
+    "0,0,0:0"
+   ],
+   "matches": 900,
+   "sha256": "08d67145d9df59a0ec33d701f5865d53d10cf455e39545bd4b1250d2896cf864"
+  },
+  "roof+floor mixed derivers": {
+   "mode": "sorted",
+   "args": [
+    "12345",
+    "0",
+    "0",
+    "60",
+    "60",
+    "0,-64,0:1",
+    "0,127,0:1"
+   ],
+   "matches": 717,
+   "sha256": "567cdf56b26c710c7e6eb99ca55bd8cbcdae7eb2674fe764c377ee66b72a54c7"
+  },
+  "all five floor layers": {
+   "mode": "sorted",
+   "args": [
+    "12345",
+    "0",
+    "0",
+    "80",
+    "80",
+    "0,-63,0:1",
+    "0,-62,0:1",
+    "0,-61,0:1",
+    "0,-60,0:1"
+   ],
+   "matches": 684,
+   "sha256": "90fb794d9c97bdcf984a23fe2b7e2cf049ec49171bde751b86e577f4c21ffef1"
+  },
+  "negative coordinates": {
+   "mode": "sorted",
+   "args": [
+    "12345",
+    "-50",
+    "-50",
+    "0",
+    "0",
+    "0,-60,0:1"
+   ],
+   "matches": 514,
+   "sha256": "f9a85a36608a017de5862f0a6a0c69ea9800b1c2d425b3a7afc383253e1f5083"
+  },
+  "past int-mul wrap (x>686)": {
+   "mode": "sorted",
+   "args": [
+    "12345",
+    "680",
+    "0",
+    "780",
+    "40",
+    "0,-60,0:1"
+   ],
+   "matches": 732,
+   "sha256": "3b6c11e32fef0c5643a1248a5cfb545c60ea433320252fdd1a34f72ab1fda197"
+  },
+  "far negative past wrap": {
+   "mode": "sorted",
+   "args": [
+    "12345",
+    "-780",
+    "-40",
+    "-680",
+    "0",
+    "0,-60,0:1"
+   ],
+   "matches": 786,
+   "sha256": "c65607a81754f39967a217f95703d46c6441139127bad1c7aee3f0ea29d0e2db"
+  },
+  "seed 0": {
+   "mode": "sorted",
+   "args": [
+    "0",
+    "0",
+    "0",
+    "40",
+    "40",
+    "0,-60,0:1"
+   ],
+   "matches": 303,
+   "sha256": "07681a5ebb60637a0bcae838da63c81b8009a307b2e3b690915edbb309b52a6d"
+  },
+  "negative seed": {
+   "mode": "sorted",
+   "args": [
+    "-4172144997902289642",
+    "0",
+    "0",
+    "40",
+    "40",
+    "0,-60,0:1"
+   ],
+   "matches": 326,
+   "sha256": "75449a15d336a71bc1385c28df42aed65dfd8ff5160cde86738f755c6752a267"
+  },
+  "extreme seed": {
+   "mode": "sorted",
+   "args": [
+    "9223372036854775807",
+    "0",
+    "0",
+    "40",
+    "40",
+    "0,-60,0:1"
+   ],
+   "matches": 351,
+   "sha256": "01fbbd5c46a6239de24881a14ec4cfe5123b24abc9d7a2bc7977daea95d64b4d"
+  },
+  "empty range": {
+   "mode": "sorted",
+   "args": [
+    "12345",
+    "10",
+    "10",
+    "10",
+    "10",
+    "0,-60,0:1"
+   ],
+   "matches": 0,
+   "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "output order x-major z-minor": {
+   "mode": "raw",
+   "args": [
+    "12345",
+    "-300",
+    "-300",
+    "300",
+    "300",
+    "0,-60,0:1",
+    "1,-60,0:1"
+   ],
+   "matches": 14286,
+   "sha256": "803ada2a33c0515a1d322b72b3f29af71611e0816c7b10de247aaab34cf8df5e"
+  },
+  "hypot clamp at INT_MAX": {
+   "mode": "full",
+   "args": [
+    "12345",
+    "2147483600",
+    "2147483600",
+    "2147483610",
+    "2147483610",
+    "0,-60,0:1"
+   ],
+   "matches": 24,
+   "sha256": "0a19b0bdf46ca4ee04a2f9b744ba360825205f20e8a1e28034706d2e3a940286"
+  }
+ }
+}

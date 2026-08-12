@@ -54,9 +54,11 @@ cuda: main.c search.cu bedrock.h
 	$(CC) $(CFLAGS) $(PARITY) -fopenmp -DUSE_CUDA -c main.c -o main.o
 	$(NVCC) $(NVCC_COMPAT) -o gpbpf main.o search.o $(LDLIBS) -Xcompiler -fopenmp
 
+# Generator regression gate. No external reference needed: tools/vectors.json
+# pins the RNG chain, and fp_proof re-establishes the float narrowing.
 test: gpbpf fp_proof
 	./fp_proof
-	./tools/verify.sh
+	python3 tools/check.py
 
 # Exhaustive check licensing the float narrowing in bd_classify. Must pass
 # before the parity harness is meaningful.

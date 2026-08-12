@@ -15,9 +15,9 @@ lockstep with the unmaintained original.
 The generator is the exception. The hash, the RNG stream, the seeding chain and
 the per-layer probabilities belong to Minecraft, not to this project — a pattern
 finder whose RNG has drifted reports coordinates that do not exist in anybody's
-world, and it does so silently. That part is checked against the Java
-implementation on every build; see [Validation](#validation). Everything around
-it — the interface, the output, the inherited warts — is ours to change, and
+world, and it does so silently. So it is pinned by recorded vectors and checked
+on every build — see [Validation](#validation). Everything around it, the
+interface and the output and the inherited warts, is ours to change;
 [CONTRIBUTING.md](CONTRIBUTING.md) says how.
 
 ## Build
@@ -41,8 +41,7 @@ Requires `openssl-devel` (MD5, used once at startup for seed derivation).
 
 ## Usage
 
-Argument-compatible with the Java original today, though the CLI is not
-frozen:
+Not frozen — see [CONTRIBUTING.md](CONTRIBUTING.md) — but stable today:
 
 ```sh
 gpbpf <worldSeed> <fromX> <fromZ> <toX> <toZ> [<block>...]
@@ -159,55 +158,52 @@ counted and the figure is exact, not estimated.
 ## Validation
 
 ```sh
-make test     # runs ./fp_proof, then ./tools/verify.sh
+make test     # runs ./fp_proof, then tools/check.py
 ```
 
-The Java implementation is the closest thing to an executable specification of
-Minecraft's bedrock RNG that runs offline, so it is the oracle the generator is
-regression-tested against. `verify.sh` runs both on identical inputs and diffs
-the match coordinates. 22 cases covering both probability bands, every band
-edge, the always-bedrock early returns, negative and past-wrap coordinates,
-extreme seeds, `pattern/*.txt` versus equivalent explicit block args, output
-ordering, and the distance field at extreme coordinates. All 22 pass byte for
-byte on both the CPU and CUDA builds.
+22 cases pinning the generator: both probability bands, every band edge, the
+always-bedrock early returns, negative and past-wrap coordinates, extreme seeds,
+`pattern/*.txt` versus equivalent explicit block args, output ordering, and the
+distance field at extreme coordinates. Needs nothing but the built binary and
+python3 — no Java, no network, no second checkout.
 
-A failure means one of two things and they are not interchangeable: the
-generator drifted, which is a bug — or the interface changed on purpose, which
-is allowed, and the harness gets updated alongside it. See
-[CONTRIBUTING.md](CONTRIBUTING.md).
+The expected results live in `tools/vectors.json` as match counts and SHA-256
+digests. They were captured from a build that passed a 22-case cross-check
+against the Java implementation the generator was originally derived from; the
+provenance block in that file records the reference commit. **A diff against
+them is a bug here, not a stale vector.** Re-record only when you have
+independently established the new output is right — "the gate is red and I want
+it green" is not that.
 
-Two cases exist to cover what the rest structurally cannot. The ordering case:
-every other case pipes both sides through `sort` before diffing, so they
-compare the match *set* and would not notice an ordering regression. It spans
-negative and positive coordinates, which is where a radix key without the
-signed bias would put the negatives last. The `hypot` case: every other case
-discards the distance field, so it is the only one comparing full output
-lines.
+Three cases use different comparison modes because they test different things.
+Most compare the match *set*, so they would not notice an ordering regression;
+one compares the raw sequence across negative and positive coordinates, which is
+where a radix key without the signed bias would put the negatives last. Another
+compares whole output lines, making it the only case that sees the distance
+field. The `pattern/*.txt` case needs no vector at all — it checks two of our own
+invocations against each other, so it cannot go stale.
 
-The harness needs no maven: it copies the reference source to a temp dir and
-strips its two external dependencies so Java's multi-file source launcher can
-run it. Guava's `Hashing.md5()`/`Longs.fromBytes` become `MessageDigest` MD5
-plus an explicit big-endian read (exact identities), and JLine's
-`terminal.getWidth()` becomes a constant. The reference repo is never modified.
+`fp_proof` runs first and is a separate kind of check: it enumerates the entire
+input space of the float comparison rather than sampling it. See below.
 
 ### Where the generator would silently drift
 
-Three details in `MathHelper.hashCode` diverge if reimplemented naively, and
-are the reason the harness tests coordinates past |x| ≈ 686:
+Three details in `bd_hash` diverge if reimplemented naively, and are the reason
+the vectors include coordinates past |x| ≈ 686:
 
 - `x * 3129871` is a **32-bit** multiply that wraps, then sign-extends. It is
   not `(long)x * 3129871L`.
 - `(long)z * 116129781L` really is 64-bit. The asymmetry with the `x` term is
   deliberate and must be preserved.
-- The final `>>` is Java's **arithmetic** shift, not `>>>`.
+- The final `>>` is an **arithmetic** shift, sign-propagating, not a logical one.
 
 `nextFloat()` cannot drift: `next(24)` is exactly representable in binary32 and
 the multiplier is exactly 2⁻²⁴, so the multiply only adjusts the exponent. The
 build passes `-ffp-contract=off` / `--fmad=false` so no FMA contraction can
 change a rounding. **Never** add `--use_fast_math`.
 
-Java compares `(double)nextFloat() < p`; `bd_probe` compares in float. That is
-a narrowing, so it is licensed by exhaustion rather than by argument:
+The generator specifies the comparison in double; `bd_probe` does it in float.
+That is a narrowing, so it is licensed by exhaustion rather than by argument:
 `nextFloat()` has exactly 2²⁴ possible outputs, and after `bd_classify` only
 four probabilities (0.8/0.6/0.4/0.2) can reach a comparison — every other `y`
 resolves to a constant verdict. `tools/fp_proof.c` enumerates that entire
@@ -308,30 +304,18 @@ the whole search, and the 12-thread CPU path wins. It pulls ahead on large
 areas, which is the last row. **The original's weakest point is output**, not
 search: the 3.2M-match row is 10.5 s in Java, most of it printing.
 
-Reproducing, once `bedrock_finder-1.1.0.jar` is built (`mvn package` in the
-reference repo):
+These are historical: a snapshot taken against the original at the point this
+stopped being a port. Reproducing our side needs nothing extra — args written
+out rather than built in a variable, because zsh does not word-split unquoted
+parameters and it would arrive as one argument:
 
 ```sh
-# 3x3 plate at y=-60. Args written out rather than built in a variable: zsh
-# does not word-split unquoted parameters, so a variable would arrive as one
-# argument (which gpbpf rejects, but only after wasting your time).
-time java -jar bedrock_finder-1.1.0.jar 12345 0 0 10000 10000 \
-  0,-60,0:1 0,-60,1:1 0,-60,2:1 \
-  1,-60,0:1 1,-60,1:1 1,-60,2:1 \
-  2,-60,0:1 2,-60,1:1 2,-60,2:1
-
-# ours, same arguments; prefix OMP_NUM_THREADS=1 for the single-thread column
+# 3x3 plate at y=-60; prefix OMP_NUM_THREADS=1 for the single-thread column
 time ./gpbpf 12345 0 0 10000 10000 \
   0,-60,0:1 0,-60,1:1 0,-60,2:1 \
   1,-60,0:1 1,-60,1:1 1,-60,2:1 \
   2,-60,0:1 2,-60,1:1 2,-60,2:1
 ```
-
-On a machine with no `mvn`/`javac`, the jar can still be built: fetch Guava and
-JLine from Maven Central, compile through `javax.tools.ToolProvider` (the
-`jdk.compiler` module is present even when the `javac` binary is not) and zip
-the result, skipping the dependency `.SF`/`.DSA`/`.RSA` signatures and
-`module-info.class`. That is how these numbers were produced.
 
 ### Output path
 
@@ -366,11 +350,10 @@ with the formatting made that trade unnecessary.
 - Match output is buffered in memory before printing, so a search emitting
   hundreds of millions of matches needs proportional RAM. Degenerate patterns
   are the ones that do this; the CUDA path caps and reports instead.
-- The "blocks from origin" field may differ from Java's `Math.hypot` in the
-  last ulp for some coordinates. Cosmetic, and the harness diffs coordinates
-  rather than distances except in the saturation case. Saturation itself is
-  handled: Java's `(int)` narrowing clamps to `Integer.MAX_VALUE` while C's is
-  undefined once the value exceeds `INT_MAX`, so `hypot_i` clamps to match.
+- The "blocks from origin" field may differ in the last ulp between libm
+  implementations. Cosmetic — it is a display value, and only one vector
+  compares it. Saturation is handled explicitly: C's narrowing of a double
+  past `INT_MAX` is undefined, so `hypot_i` clamps instead of finding out.
 - A missing `pattern/` directory leaves the pattern empty, which matches every
   column, so the CLI prints one line per column searched. Inherited from the
   Java original and not yet changed; the web GUI already refuses it. This is

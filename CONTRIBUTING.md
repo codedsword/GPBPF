@@ -22,39 +22,36 @@ coordinates that do not exist in anybody's world — and it does so silently,
 because you cannot tell a wrong answer from a rare formation by looking at it.
 That is a far worse failure than any interface wart.
 
-So the Java reference has changed job. It is no longer the definition of
-correct; it is the best **oracle** we have for the generator, and the parity
-harness is how we notice unintended drift:
+That part is pinned by recorded vectors — match counts and SHA-256 digests in
+`tools/vectors.json`, captured from a build that was cross-checked against the
+Java implementation the generator originally came from, and verified on every
+build since. Nothing external is needed to run it:
 
 ```sh
-make test        # 22 cases + fp_proof. Still green, still expected to be.
+make test        # 22 cases + fp_proof. Only needs the binary and python3.
 ```
 
-When you change something the harness checks *on purpose* — output format,
-CLI shape, one of the inherited quirks below — that is a legitimate change, not
-a broken gate. Update the harness in the same pull request and add a line to
-[Deliberate divergences](#deliberate-divergences) saying what changed and why.
-What is not acceptable is quietly loosening the harness because a generator
-change made it fail.
+A red gate means one of two things, and they are not interchangeable:
 
-If you cannot run it (see [Setup](#setup)), say so in the pull request and
-someone else will.
+- **The generator drifted.** That is a bug. Fix the code, not the vectors.
+  Re-record only when you have *independently* established the new output is
+  right — "the gate is red and I would like it green" is not that.
+- **You changed the interface on purpose.** Output format, CLI shape, one of the
+  inherited quirks below. Entirely legitimate: update the case in
+  `tools/check.py`, re-record, and add a row to
+  [Deliberate divergences](#deliberate-divergences) so the next person can tell
+  intent from regression.
 
 ## Setup
 
 ```sh
-sudo dnf install gcc openssl-devel python3 java-latest-openjdk   # or your distro's equivalent
-                                                                 # java 22+ for the source launcher
+sudo dnf install gcc openssl-devel python3   # or your distro's equivalent
 git clone git@github.com:codedsword/GPBPF.git
-git clone https://github.com/benitez-tomas/bedrock-pattern-finder.git   # sibling directory
 cd GPBPF && make && make test
 ```
 
-`tools/verify.sh` looks for the Java reference at `../bedrock-pattern-finder` by
-default; pass a path as the first argument if you keep it somewhere else. You do
-**not** need maven — the harness copies the reference source to a temp directory,
-strips its two external dependencies, and runs it through Java's multi-file
-source launcher. It never modifies the reference checkout.
+That is the whole thing. No JDK, no maven, no second checkout, no network — the
+gates run against a checked-in vector file.
 
 For the GPU path you also need the CUDA toolkit and a host compiler nvcc
 accepts (CUDA 13.x wants gcc ≤ 15; `make cuda` uses `g++-15` automatically if it
@@ -65,11 +62,10 @@ except the CUDA-specific behaviour is testable.
 
 | command | what it proves | needs |
 |---------|----------------|-------|
-| `make test` | output still matches the Java reference byte for byte, and the float narrowing in `bd_classify` is exhaustively safe | java, the reference checkout |
+| `make test` | the generator still produces the recorded output, and the float narrowing in `bd_classify` is exhaustively safe | python3 |
 | `make webtest` | the web server returns exactly what the CLI does, and its input validation holds | python3, and the binary it builds |
 
-Run both. `make test` takes a couple of minutes because it runs Java 22 times;
-`make webtest` takes seconds.
+Both take seconds; run both.
 
 A red `make test` means one of two things, and they are not the same: the
 generator drifted (a bug — fix it), or you changed something on purpose
@@ -109,6 +105,7 @@ you make one, so the next person can tell intent from regression.
 | what | why |
 |------|-----|
 | The web GUI refuses an empty pattern | The CLI's behaviour here is a footgun that emits one line per column searched |
+| The Java cross-check became recorded vectors | The project stands on its own; the vectors carry the same guarantee without needing the original to build or test |
 
 ## Generator internals that must not drift
 
@@ -124,7 +121,7 @@ open to redesign. All are commented in the source; this is the short list.
 2. **`nextFloat()` stays single precision.** `next(24)` is exactly representable
    in binary32 and the multiplier is exactly 2⁻²⁴, so the multiply only adjusts
    the exponent. Widening to double before the multiply changes results.
-3. **The float comparison in `bd_probe`.** Java compares
+3. **The float comparison in `bd_probe`.** The generator specifies
    `(double)nextFloat() < p`; we compare in float. That narrowing is licensed by
    exhaustion, not by argument: `tools/fp_proof.c` enumerates all 2²⁴ possible
    draws against all four reachable probabilities. **If `fp_proof` ever fails,
@@ -220,8 +217,8 @@ the bug it was warning about.
 
 - One logical change per PR.
 - Say which gates you ran and paste the summary lines.
-- If you could not run `make test` (no Java, no reference checkout), say so
-  explicitly rather than leaving it ambiguous.
+- `make test` needs no special setup, so there is no excuse for not saying
+  whether it passed.
 - Performance claims need numbers and the command that produced them.
 
 Bug reports are welcome without any of this — a seed, a pattern, and what you
