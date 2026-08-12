@@ -38,6 +38,25 @@ body {
 	display: flex;
 	flex-direction: column;
 }
+/* Scrollbars, in the same bevelled language as the buttons. WebKit/Blink take
+ * the pseudo-elements; Firefox has no ::-webkit-scrollbar and takes the standard
+ * two properties instead. The @supports guard matters: in Chromium a
+ * `scrollbar-color` anywhere switches that scroller to the standard renderer and
+ * the pseudo-element rules below stop applying entirely. */
+::-webkit-scrollbar { width: .8rem; height: .8rem; }
+::-webkit-scrollbar-track { background: var(--sunk); }
+::-webkit-scrollbar-corner { background: var(--sunk); }
+::-webkit-scrollbar-thumb {
+	background: #3c3c48;
+	border: 2px solid;
+	border-color: var(--hi) var(--lo) var(--lo) var(--hi);
+}
+::-webkit-scrollbar-thumb:hover { background: #4a4a5a; }
+::-webkit-scrollbar-thumb:active { border-color: var(--lo) var(--hi) var(--hi) var(--lo); }
+@supports not selector(::-webkit-scrollbar) {
+	* { scrollbar-width: thin; scrollbar-color: #3c3c48 var(--sunk); }
+}
+
 /* Borders stay in px on purpose: they already scale with zoom, and fractional
  * em borders render blurry at the 1px hairlines this UI is built from. */
 h1 { font-size: 1.15rem; margin: 0; letter-spacing: .14em; text-transform: uppercase; }
