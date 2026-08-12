@@ -66,11 +66,14 @@ Because typing 25 block arguments for a 5×5 pattern is not a good time. Draw th
 pattern on a grid instead, one tab per Y layer, and the page tells you how
 selective it is *before* you run anything:
 
-- **Expected match count, live.** Bedrock probability is fixed per layer (`−63`
-  is 80% bedrock, `−62` 60%, `−61` 40%, `−60` 20%, and the roof mirrors it), so
-  the expected number of hits is just the product of those over the area. A
-  pattern that would emit 12 GB of text says so while you are still drawing it,
-  and one that can never match — wanting bedrock at `y=-59`, say — says that too.
+- **Expected match count, measured.** A rough number from the per-layer
+  probabilities (`−63` is 80% bedrock, `−62` 60%, `−61` 40%, `−60` 20%, and the
+  roof mirrors it) appears as you draw. A moment later the server samples the
+  real search and replaces it with a measured figure and an interval. A pattern
+  that would emit 12 GB of text says so before you run it, and one that can
+  never match — wanting bedrock at `y=-59`, say — says that too. Measuring
+  rather than modelling is not gold-plating; see
+  [Layers are not independent](#layers-are-not-independent).
 - **A bedrock viewer.** Pan around the actual bedrock at any layer and see a
   match with the pattern outlined on top of it, rather than taking a coordinate
   on faith. It is a one-block search per frame, so it costs no new search code.
@@ -87,9 +90,62 @@ it; both targets produce `./gpbpf`.
 It binds `127.0.0.1` and refuses searches that would match every column. `--host`
 exposes it to the network and warns when you use it.
 
+Searches are capped at 2 billion columns (about 44,700 × 44,700) so a stray zero
+cannot turn a ten-second search into an all-day one. Raise it with:
+
+```sh
+make web AREA=20000000000          # or: python3 web/serve.py --max-area 20000000000
+```
+
 ```sh
 make webtest  # server results must equal the CLI's, byte for byte
 ```
+
+### Layers are not independent
+
+The estimate multiplies the per-layer probabilities, which assumes each block's
+draw is independent of the others. That holds within a single Y layer and breaks
+badly across layers. Measured over 100M columns, seed 12345, blocks at
+`dx = 0…4` on each layer:
+
+| pattern | measured rate | independent model | ratio |
+|---------|---------------|-------------------|-------|
+| 5 blocks, 1 layer (`−63`) | 0.328114 | 0.32768 | **1.00** |
+| 10 blocks, 2 layers | 0.0266059 | 0.0254802 | 1.04 |
+| 15 blocks, 3 layers | 9.2761e-4 | 2.6092e-4 | **3.6** |
+| 20 blocks, 4 layers | 3.96e-6 | 8.3493e-8 | **47** |
+
+Two probes at the same column but different Y share a deriver, and their hashes
+differ only in a few low bits before `bd_hash` mixes them, so bedrock stacks
+vertically far more often than chance. This is the generator's own behaviour,
+not a porting artefact: the CPU and CUDA builds return byte-identical counts for
+every row above.
+
+The error is always in the direction of *more* matches, which is the unhelpful
+one for a number whose job is to warn about output size. So the GUI does not
+rely on the model: `POST /api/estimate` runs the real search over a slice and
+extrapolates, which needs no independence assumption at all. The model number is
+still shown instantly while you draw, then replaced.
+
+Three things make that sampling honest:
+
+- **Two stages, so the output stays bounded.** A pattern matching most columns
+  would stream gigabytes through a naive fixed-size sample. The first sample is
+  ~260k columns; a permissive pattern reaches its hit target there and stops,
+  and one that does not is by definition rare enough that the second, larger
+  sample cannot emit more than a few tens of thousands of lines.
+- **The slice spans every Z.** Match rates are not spatially uniform — over nine
+  disjoint 10000×10000 tiles the spread was 2.6%, *7.8× what Poisson noise
+  predicts*, and it grouped almost entirely by Z. That follows from `bd_hash`:
+  z is multiplied by a full 64-bit constant while x wraps in 32 bits. A
+  full-height strip lands within 1.6% of the true rate; a square block of the
+  same column count was off by up to 6.1%.
+- **The interval admits that.** Reported bounds combine Poisson counting error
+  with a 2.5% spatial term measured from those strips, so a large sample never
+  claims a precision the method cannot deliver.
+
+When the search area is smaller than the sample budget the whole thing is
+counted and the figure is exact, not estimated.
 
 ## Validation
 
@@ -186,6 +242,36 @@ integer multiplies in `bd_hash` gains 6%, and removing the 64-bit div/mod used
 to unflatten the thread index gains nothing at all — nvcc hoists the invariant
 reciprocal out of the loop, so it costs 3 instructions for the whole kernel.
 
+### At 400 billion columns
+
+800,000 × 500,000 = 400,000,000,000 columns(bigger than the current pre-update donutSMP world), seed 12345, RTX 3070. A thousand
+times the area of the largest benchmark below, and the first workload where
+CUDA's ~0.2 s of context initialisation is genuinely irrelevant.
+
+| pattern | CUDA | CPU, 12 threads | matches |
+|---------|------|-----------------|---------|
+| 3×3 plate at `y=−60` (9 blocks, 1 layer) | **14.0 s** (28.6 G col/s) | 326.3 s (1.23 G col/s) | 205,143 |
+| 20 blocks across `y=−63…−60` (4 layers) | **36.4 s** (11.0 G col/s) | — | 1,827,374 |
+
+CUDA is **23×** the 12-thread CPU path here, and both produced the same 205,143
+matches. The Java original would need about four hours at its measured 27.6M
+columns/s, so this is roughly a **1000×** span end to end.
+
+The two rows differ because of the early exit in `bd_check`: the plate's first
+probe is `p=0.2`, so 80% of columns are rejected after one RNG call, while the
+20-block pattern starts on the `y=−63` layer at `p=0.8` and keeps 80% of columns
+alive into a second probe. The plate row is also a check on the search itself —
+205,143 against 400e9 × 0.2⁹ = 204,800 predicted, 0.17% off.
+
+```sh
+# args spelled out: zsh does not word-split unquoted parameters, so a variable
+# would arrive as one argument
+time ./gpbpf 12345 -400000 -250000 400000 250000 \
+  0,-60,0:1 0,-60,1:1 0,-60,2:1 \
+  1,-60,0:1 1,-60,1:1 1,-60,2:1 \
+  2,-60,0:1 2,-60,1:1 2,-60,2:1
+```
+
 ### Versus the original
 
 Measured against the real `bedrock_finder-1.1.0.jar` built from the Java
@@ -271,3 +357,9 @@ with the formatting made that trade unnecessary.
   undefined once the value exceeds `INT_MAX`, so `hypot_i` clamps to match.
 - A missing `pattern/` directory leaves the pattern empty, which matches every
   column. This is the reference's behaviour, preserved deliberately.
+- A search spanning more than 2⁶³ columns is refused by the CUDA path and falls
+  back to the CPU, because the flattened index would not fit in `long long`.
+  Reaching it needs nearly the full int32 range on *both* axes; the CPU path is
+  correct there but would take geological time. Searches wider than 2³¹ columns
+  on a single axis are handled: `search.cu` unflattens the thread index in
+  64-bit and narrows once, rather than truncating the quotient first.

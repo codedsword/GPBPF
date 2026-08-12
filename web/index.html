@@ -212,7 +212,37 @@ summary { cursor: pointer; color: var(--dim); }
 details pre { background: var(--sunk); padding: .55rem; overflow: auto; border: 1px solid var(--edge); }
 .flexbar { display: flex; gap: .6rem; align-items: center; margin-bottom: .45rem; }
 .flexbar .spacer { flex: 1; }
-.hide { display: none; }
+.hide { display: none !important; }
+
+/* search overlay -------------------------------------------------------- */
+.modal {
+	position: fixed; inset: 0; z-index: 10; display: flex;
+	align-items: center; justify-content: center;
+	background: rgba(6, 6, 10, .72);
+}
+.modalbox {
+	background: var(--panel); padding: 1.5rem 2rem; text-align: center;
+	min-width: 17rem; max-width: 90vw;
+	border: 2px solid; border-color: var(--hi) var(--lo) var(--lo) var(--hi);
+}
+.modalbox h3 {
+	margin: 0; font-size: 1.15rem; font-weight: 700;
+	letter-spacing: .16em; text-transform: uppercase;
+}
+.modalbox .why { color: var(--dim); font-size: .92rem; margin-top: .5rem; }
+.modalbox .why b { color: var(--text); font-family: ui-monospace, monospace; }
+.modalbox button { margin-top: 1.1rem; padding: .5rem 1.6rem; }
+/* blocks, because this is a Minecraft tool */
+.spin { display: flex; gap: .35rem; justify-content: center; margin: 1.1rem 0 .2rem; }
+.spin i { width: .8rem; height: .8rem; background: var(--rock); animation: blk .9s infinite ease-in-out; }
+.spin i:nth-child(2) { animation-delay: .12s; }
+.spin i:nth-child(3) { animation-delay: .24s; }
+.spin i:nth-child(4) { animation-delay: .36s; }
+@keyframes blk {
+	0%, 100% { opacity: .22; transform: translateY(0); }
+	40%      { opacity: 1;   transform: translateY(-.45rem); }
+}
+@media (prefers-reduced-motion: reduce) { .spin i { animation: none; opacity: .7; } }
 </style>
 
 <header>
@@ -221,6 +251,15 @@ details pre { background: var(--sunk); padding: .55rem; overflow: auto; border: 
 	<div class="spacer"></div>
 	<div class="sub" id="binfo"></div>
 </header>
+
+<div class="modal hide" id="modal">
+	<div class="modalbox" role="status" aria-live="polite">
+		<h3 id="mtitle">Searching…</h3>
+		<div class="spin" id="mspin"><i></i><i></i><i></i><i></i></div>
+		<div class="why" id="mbody"></div>
+		<button id="mclose" class="hide">Close</button>
+	</div>
+</div>
 
 <main>
 <div class="col">
@@ -381,6 +420,7 @@ const S = {
 	active: 0,
 	w: 5, h: 5,
 	view: { y: -60, x0: -32, z0: -32, scale: 6 },
+	sample: null, sampleErr: false,
 	res: null, sel: -1,
 };
 
@@ -469,14 +509,48 @@ function estimate() {
 			dead = "y=" + y + " is " + (pOf(y) ? "always" : "never") + " bedrock, but the pattern wants the opposite";
 		p *= q;
 	}
-	return { area, w, h, p, n: area * p, blocks: b.length, dead };
+	return { area, w, h, p, n: area * p, blocks: b.length, dead,
+	         layers: new Set(b.map((k) => k[1])).size };
+}
+
+/* The model number appears instantly on every edit; the measured one replaces
+ * it a moment later. Keeping both means the box is never blank while typing and
+ * never wrong once the sample lands. */
+let sampleTok = 0, sampleTimer = null;
+
+function scheduleSample() {
+	clearTimeout(sampleTimer);
+	S.sample = null;
+	S.sampleErr = false;
+	sampleTok++;                      /* invalidate anything in flight */
+	renderEstimate();                 /* back to the model while we wait */
+	sampleTimer = setTimeout(runSample, 450);
+}
+
+async function runSample() {
+	const e = estimate();
+	if (!e.blocks || e.dead || !e.area) return;
+	const tok = ++sampleTok;
+	let d = null;
+	try {
+		const r = await fetch("/api/estimate", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(reqBody(1)),
+		});
+		/* fetch resolves for a 4xx, so a rejected request has to be handled
+		 * here and not left to catch -- otherwise the box says "estimating..."
+		 * forever when the area is over the server's cap */
+		d = r.ok ? await r.json() : null;
+	} catch (err) { d = null; }
+	if (tok !== sampleTok) return;      /* superseded by a newer edit */
+	if (d) S.sample = d; else S.sampleErr = true;
+	renderEstimate();
 }
 
 function renderEstimate() {
-	const e = estimate(), el = $("est");
-	/* the search dimensions live here rather than under the bounds fields: same
-	 * information, one fewer row in a column that has to fit on screen */
-	const dims = fmt(e.w) + "×" + fmt(e.h) + " = " + human(e.area) + " columns";
+	const e = estimate(), el = $("est"), s = S.sample;
+	const dims = fmt(e.w) + "\u00d7" + fmt(e.h) + " = " + human(e.area) + " columns";
 	el.className = "est";
 	if (!e.area) {
 		el.className = "est bad";
@@ -489,13 +563,31 @@ function renderEstimate() {
 	} else if (e.dead) {
 		el.className = "est bad";
 		el.innerHTML = "<b>No matches possible</b><div class='why'>" + e.dead + ".</div>";
+	} else if (s && s.exact) {
+		el.innerHTML = "<b>" + fmt(s.hits) + " matches</b> <span class='why'>exact · ~"
+			+ bytes(s.hits * 34) + "</span><div class='why'>" + e.blocks
+			+ " blocks · counted every one of " + dims + "</div>";
+	} else if (s && s.hits) {
+		if (s.expected > 200000) el.className = "est warn";
+		el.innerHTML = "<b>\u2248 " + human(s.expected) + " matches</b> <span class='why'>"
+			+ "measured · ~" + bytes(s.expected * 34) + "</span><div class='why'>"
+			+ e.blocks + " blocks · " + fmt(s.hits) + " hits in " + human(s.sampled)
+			+ " sampled columns \u2192 " + human(s.lo) + "\u2013" + human(s.hi)
+			+ " over " + dims + "</div>";
+	} else if (s) {
+		el.innerHTML = "<b>under " + human(s.hi) + " matches</b> <span class='why'>"
+			+ "measured</span><div class='why'>" + e.blocks + " blocks · no hits in "
+			+ human(s.sampled) + " sampled columns, so this is a 95% upper bound "
+			+ "over " + dims + "</div>";
 	} else {
 		const big = e.n > 200000;
 		if (big) el.className = "est warn";
-		el.innerHTML = "<b>≈ " + human(e.n) + " matches</b> <span class='why'>expected · ~"
-			+ bytes(e.n * 34) + "</span><div class='why'>" + e.blocks + " blocks · 1 in "
-			+ human(1 / e.p) + " · " + dims
-			+ (big ? " · listing the first 2,000" : "") + "</div>";
+		el.innerHTML = "<b>\u2248 " + human(e.n) + " matches</b> <span class='why'>"
+			+ (S.sampleErr ? "estimated" : "estimating\u2026") + " · ~"
+			+ bytes(e.n * 34) + "</span><div class='why'>"
+			+ e.blocks + " blocks · 1 in " + human(1 / e.p) + " · " + dims
+			+ (e.layers > 1 ? " · assumes layers are independent, which they are not"
+			                : "") + "</div>";
 	}
 	$("run").disabled = !e.blocks || !!e.dead || !e.area;
 }
@@ -611,7 +703,7 @@ function setCell(x, z, el) {
 	if (L.cells[i] === paint) return;
 	L.cells[i] = paint;
 	el.className = cls(paint);
-	renderEstimate();   /* cheap, and it is the feedback worth having live */
+	scheduleSample();   /* clears the measurement and repaints from the model */
 	dirty = true;
 }
 
@@ -662,11 +754,31 @@ function reqBody(limit) {
 	         blocks: blocks(), limit };
 }
 
+/* The search is one blocking request that can run for tens of seconds over a
+ * large area, so say so rather than leaving a page that looks hung. */
+function modal(title, body, done) {
+	$("modal").classList.remove("hide");
+	$("mtitle").textContent = title;
+	$("mbody").innerHTML = body;
+	$("mspin").classList.toggle("hide", done);
+	$("mclose").classList.toggle("hide", !done);
+	if (done) $("mclose").focus();
+}
+const modalDone = () => !$("mclose").classList.contains("hide");
+function modalClose() { $("modal").classList.add("hide"); }
+
+$("mclose").onclick = modalClose;
+/* only dismissable once the search has finished -- there is nothing to cancel */
+$("modal").onclick = (ev) => { if (ev.target === $("modal") && modalDone()) modalClose(); };
+addEventListener("keydown", (ev) => { if (ev.key === "Escape" && modalDone()) modalClose(); });
+
 async function search() {
-	const btn = $("run");
+	const btn = $("run"), est = estimate();
 	btn.disabled = true;
 	btn.textContent = "Searching…";
 	$("rbanner").innerHTML = "";
+	modal("Searching…", "<b>" + human(est.area) + "</b> columns · ≈ <b>"
+		+ human(est.n) + "</b> matches expected", false);
 	try {
 		const r = await fetch("/api/search", {
 			method: "POST",
@@ -678,12 +790,16 @@ async function search() {
 		S.res = d;
 		S.sel = -1;
 		renderResults();
+		modal("Done", "<b>" + fmt(d.count) + "</b> match" + (d.count === 1 ? "" : "es")
+			+ " in <b>" + d.elapsed.toFixed(2) + " s</b>"
+			+ (d.warnings.length ? "<br>" + esc(d.warnings.join(" ")) : ""), true);
 	} catch (e) {
 		S.res = null;
 		$("rbanner").innerHTML = "<div class='banner bad'>" + esc(e.message) + "</div>";
 		$("stat").innerHTML = "<span>Search failed.</span>";
 		$("rows").innerHTML = "";
 		drawScatter();
+		modal("Search failed", esc(e.message), true);
 	}
 	btn.textContent = "Search";
 	renderEstimate();
@@ -877,7 +993,8 @@ function renderVy() {
 function copy(t) { navigator.clipboard.writeText(t); }
 
 function renderAll() {
-	renderTabs(); renderGrid(); renderEstimate(); renderCli(); renderVy();
+	renderTabs(); renderGrid(); renderCli(); renderVy();
+	scheduleSample();
 	save();
 }
 
@@ -911,10 +1028,10 @@ $("seed").oninput = (e) => {
 	 * height when it has something to say (text seed, or out of range) */
 	$("seedout").textContent = s.how;
 	$("seedout").style.color = s.n ? "var(--dim)" : "var(--bad)";
-	renderCli(); save(); vRefresh();
+	renderCli(); scheduleSample(); save(); vRefresh();
 };
 for (const id of ["x0", "z0", "x1", "z1"])
-	$(id).oninput = () => { renderEstimate(); renderCli(); drawScatter(); save(); };
+	$(id).oninput = () => { scheduleSample(); renderCli(); drawScatter(); save(); };
 for (const id of ["cx", "cz", "rad"])
 	$(id).oninput = () => {
 		const cx = numOf("cx"), cz = numOf("cz"), r = numOf("rad");
@@ -924,7 +1041,7 @@ for (const id of ["cx", "cz", "rad"])
 		const a = Math.abs(r);
 		$("x0").value = cx - a; $("z0").value = cz - a;
 		$("x1").value = cx + a; $("z1").value = cz + a;
-		renderEstimate(); renderCli(); drawScatter(); save();
+		scheduleSample(); renderCli(); drawScatter(); save();
 	};
 for (const id of ["gw", "gh"])
 	$(id).oninput = () => {

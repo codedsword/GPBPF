@@ -2,6 +2,7 @@
  * Compiled only by `make cuda`; main.c falls back to the OpenMP path when this
  * translation unit is absent or the runtime reports no usable device.
  */
+#include <limits.h>
 #include <stdio.h>
 
 #include "bedrock.h"
@@ -28,8 +29,16 @@ __global__ void search_kernel(bd_derivers d, int npat, int xf, int zf,
 
 	for (long long i = blockIdx.x * (long long)blockDim.x + threadIdx.x;
 	     i < total; i += stride) {
-		int x = xf + (int)(i / height);
-		int z = zf + (int)(i % height);
+		/* Unflatten in 64-bit and narrow once at the end. `xf + (int)(i /
+		 * height)` overflows int for any search wider than 2^31 columns:
+		 * the quotient does not fit, and adding the truncated value to xf
+		 * overflows again. Both wraps cancel under two's complement, so
+		 * nvcc happens to produce the right answer today -- but it is
+		 * undefined behaviour and the compiler is entitled to assume it
+		 * cannot happen. The sum here is always within [xf, xt), so this
+		 * narrowing is exact. */
+		int x = (int)(xf + i / height);
+		int z = (int)(zf + i % height);
 
 		if (bd_check(&d, c_pat, npat, x, z)) {
 			unsigned int k = atomicAdd(count, 1u);
@@ -64,6 +73,14 @@ extern "C" int gpu_search(const bd_derivers *d, const bd_block *pat, int npat,
 
 	if (width <= 0 || height <= 0)
 		return 0; /* empty range, same as the Java loop bounds */
+
+	/* width and height are each up to 2^32-1, so their product can exceed
+	 * int64. That would wrap negative and make `i < total` false on the first
+	 * iteration -- a silently empty result rather than a slow one. */
+	if (width > LLONG_MAX / height) {
+		fprintf(stderr, "gpbpf: search area exceeds 2^63 columns\n");
+		return -1;
+	}
 
 	if (npat > MAX_PATTERN) {
 		fprintf(stderr, "gpbpf: pattern has %d blocks, constant-memory limit is %d\n",

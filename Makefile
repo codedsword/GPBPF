@@ -27,6 +27,9 @@ PARITY := -ffp-contract=off
 LDLIBS := -lcrypto -lm
 
 PORT ?= 8765
+# Largest search the web GUI will accept, in columns. Guards against a stray
+# zero turning a 10-second search into an all-day one; raise it freely.
+AREA ?= 2000000000
 
 .PHONY: all cuda test web webtest clean
 
@@ -64,10 +67,10 @@ fp_proof: tools/fp_proof.c bedrock.h
 # the CPU build unless you ran `make cuda` first (both produce ./gpbpf, and make
 # will not rebuild it if it is already newer than main.c).
 web: gpbpf
-	python3 web/serve.py --port $(PORT) --open
+	python3 web/serve.py --port $(PORT) --max-area $(AREA) --open
 
 webtest: gpbpf
 	python3 web/serve.py --selftest
 
 clean:
-	rm -f gpbpf fp_proof main.o search.o
+	rm -f gpbpf gpbpf_cpu fp_proof main.o search.o

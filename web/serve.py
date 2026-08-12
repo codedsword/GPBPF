@@ -13,6 +13,7 @@ Stdlib only. python3 is already required by this repo (tools/verify.sh).
 """
 import argparse
 import json
+import math
 import os
 import re
 import struct
@@ -210,6 +211,65 @@ def render_view(q, cfg):
     return png_gray_alpha(w, h, px)
 
 
+# First sample. Small enough that even a pattern matching most columns only
+# produces a couple of hundred thousand lines.
+SAMPLE_STAGE1 = 512 * 512
+# Hits needed before the first sample is trusted; 200 gives +-14% at 95%.
+SAMPLE_MIN_HITS = 200
+
+
+# Residual error of a full-height strip sample, from the measurement below.
+# Combined in quadrature with the Poisson term so the reported interval is not
+# narrower than the sampling method can actually support.
+SAMPLE_SPATIAL_ERR = 0.025
+
+
+def sample_rect(x0, z0, w, h, budget):
+    """A slice spanning the whole Z range of the search.
+
+    Match rates are not spatially uniform: `bd_hash` multiplies z by a full
+    64-bit constant but wraps x in 32 bits, and the result is that distant Z
+    bands differ by several percent while X is nearly flat. Measured on nine
+    disjoint 10000x10000 tiles, the spread between tiles was 2.6% -- 7.8x what
+    Poisson counting noise predicts -- and it grouped almost entirely by z.
+
+    So the sample has to cover every Z rather than be a compact block. Over 3e7
+    columns a full-height strip landed within 1.6% of the true rate (usually
+    under 0.8%), while square blocks of the same column count were off by up
+    to 6.1%.
+    """
+    if w * h <= budget:
+        return x0, z0, w, h
+    if h > budget:  # a single Z-column already exceeds the budget
+        return x0, z0 + (h - budget) // 2, 1, budget
+    sw = max(1, min(w, budget // h))
+    return x0 + (w - sw) // 2, z0, sw, h
+
+
+def sample_rate(argv, cfg, x0, z0, w, h, area):
+    """Measure the real match rate on a sub-rectangle of the search.
+
+    Multiplying the per-layer probabilities assumes the blocks are independent,
+    which they are not across Y -- measured 47x low at four layers. Counting
+    actual hits is exact by construction and needs no model at all.
+
+    Two stages, because the output has to stay bounded: a permissive pattern
+    reaches SAMPLE_MIN_HITS on the small first sample and stops there, and one
+    that does not is by definition rare enough that the big second sample cannot
+    emit more than a few tens of thousands of lines.
+    """
+    def once(budget):
+        sx, sz, sw, sh = sample_rect(x0, z0, w, h, budget)
+        a = argv[:2] + [str(sx), str(sz), str(sx + sw), str(sz + sh)] + argv[6:]
+        _, hits, _, warn = run_search(a, cfg, 1)
+        return sw * sh, hits, warn
+
+    n, hits, warn = once(min(SAMPLE_STAGE1, area))
+    if hits < SAMPLE_MIN_HITS and n < min(cfg.sample, area):
+        n, hits, warn = once(min(cfg.sample, area))
+    return n, hits, warn
+
+
 def make_handler(cfg):
     class Handler(BaseHTTPRequestHandler):
         server_version = "gpbpf-web"
@@ -256,7 +316,7 @@ def make_handler(cfg):
                 self._json(404, {"error": "not found"})
 
         def do_POST(self):
-            if self.path != "/api/search":
+            if self.path not in ("/api/search", "/api/estimate"):
                 return self._json(404, {"error": "not found"})
             # Requiring JSON forces a CORS preflight we never answer, so a page
             # on another origin cannot drive this server. Impact would be low
@@ -268,15 +328,40 @@ def make_handler(cfg):
             if n > MAX_BODY:
                 return self._json(413, {"error": "request too large"})
             raw = self.rfile.read(n)
+            if self.path == "/api/estimate":
+                return self._guard(lambda: self._estimate(raw))
             self._guard(lambda: self._search(raw))
 
-        def _search(self, raw):
+        def _estimate(self, raw):
+            """Expected match count, measured rather than modelled."""
+            d = self._body(raw)
+            argv, area = parse_search(d, cfg)
+            x0, z0, x1, z1 = (int(v) for v in argv[2:6])
+            t0 = time.monotonic()
+            n, hits, warn = sample_rate(argv, cfg, x0, z0, x1 - x0, z1 - z0, area)
+            rate = hits / float(n)
+            exp = rate * area
+            if hits:  # Poisson interval on the observed count
+                rel = math.hypot(1.96 / math.sqrt(hits), SAMPLE_SPATIAL_ERR)
+                lo, hi = exp * max(0.0, 1.0 - rel), exp * (1.0 + rel)
+            else:     # nothing seen: report the 95% upper bound instead
+                lo, hi = 0.0, 3.0 / n * area
+            self._json(200, {"area": area, "sampled": n, "hits": hits,
+                             "rate": rate, "expected": exp, "lo": lo, "hi": hi,
+                             "exact": n == area, "warnings": warn,
+                             "elapsed": time.monotonic() - t0})
+
+        def _body(self, raw):
             try:
                 d = json.loads(raw or b"{}")
             except ValueError:
                 raise BadRequest("body is not valid JSON")
             if not isinstance(d, dict):
                 raise BadRequest("body must be an object")
+            return d
+
+        def _search(self, raw):
+            d = self._body(raw)
             limit = as_int(d.get("limit", 5000), 1, 200000, "limit")
             argv, area = parse_search(d, cfg)
             matches, count, elapsed, warnings = run_search(argv, cfg, limit)
@@ -398,6 +483,70 @@ def selftest(cfg):
                     "toX": INT32_MAX, "toZ": 4, "blocks": [[5, -60, 0, 1]]})
     check("pattern offset past INT32_MAX rejected", code == 400)
 
+    # 6. the measured estimate. The point of it is the multi-layer case, where
+    #    multiplying per-layer probabilities is 3.6x low, so check the sampled
+    #    interval actually brackets the true count from a full search.
+    def est(body):
+        req = urllib.request.Request(base + "/api/estimate",
+                                     data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        return json.loads(urllib.request.urlopen(req).read())
+
+    # The area must exceed the sample budget or the "sample" is the whole search
+    # and returns an exact count -- which passes this check without ever
+    # exercising the extrapolation it is supposed to test. Hence `not exact`.
+    SIDE = 20000
+    AREA = SIDE * SIDE
+    three = [[dx, y, 0, 1] for y in (-63, -62, -61) for dx in range(5)]
+    box = {"seed": 12345, "fromX": 0, "fromZ": 0, "toX": SIDE, "toZ": SIDE}
+    truth = subprocess.run([cfg.binary, "12345", "0", "0", str(SIDE), str(SIDE)]
+                           + ["%d,%d,0:1" % (dx, y) for y in (-63, -62, -61)
+                              for dx in range(5)], cwd=ROOT, capture_output=True)
+    actual = truth.stdout.count(b"@")
+    model = 0.8 ** 5 * 0.6 ** 5 * 0.4 ** 5 * AREA
+    e = est(dict(box, blocks=three))
+    check("extrapolated, not counted (%s of %s columns)"
+          % (format(e["sampled"], ","), format(AREA, ",")),
+          not e["exact"] and e["sampled"] < AREA)
+    check("sampled interval brackets truth (%d in %d-%d, model said %d)"
+          % (actual, int(e["lo"]), int(e["hi"]), int(model)),
+          e["lo"] <= actual <= e["hi"] and not (e["lo"] <= model <= e["hi"]))
+
+    # The three properties below are asserted directly rather than inferred from
+    # the interval: at ~250 hits the Poisson term is +-12%, which cannot resolve
+    # a 6% sampling bias, so a statistical check would pass with any of them
+    # broken. Structure is testable where statistics is not.
+    sx, sz, sw, sh = sample_rect(0, 0, SIDE, SIDE, 260000)
+    check("sample strip spans every Z (%dx%d)" % (sw, sh),
+          (sz, sh) == (0, SIDE) and sw * sh <= 260000 and sw < SIDE)
+    # a pattern too rare for the first sample must trigger the second
+    rare = [[dx, y, 0, 1] for y in (-63, -62, -61, -60) for dx in range(5)]
+    e2 = est(dict(box, blocks=rare))
+    check("rare pattern escalates to the big sample (%s columns, %d hits)"
+          % (format(e2["sampled"], ","), e2["hits"]),
+          e2["sampled"] > SAMPLE_STAGE1 and e2["hits"] > 0)
+
+    # a permissive pattern must not stream millions of lines through the sampler
+    e = est(dict(box, blocks=[[0, -60, 0, 1]]))
+    check("permissive pattern: rate %.3f, %.2fs" % (e["rate"], e["elapsed"]),
+          0.19 < e["rate"] < 0.21 and e["elapsed"] < 10.0)
+
+    # Checked here and not above: this pattern yields tens of thousands of hits,
+    # so the Poisson term falls under the spatial floor and the floor is what
+    # sets the width. At a few hundred hits Poisson dominates and the floor
+    # could be deleted without any test noticing.
+    width = (e["hi"] - e["lo"]) / (2.0 * e["expected"])
+    check("interval floored by the spatial error (%.4f)" % width,
+          width >= SAMPLE_SPATIAL_ERR * 0.99 and 1.96 / math.sqrt(e["hits"]) < width)
+
+    # small enough to count outright rather than sample
+    e = est({"seed": 12345, "fromX": 0, "fromZ": 0, "toX": 200, "toZ": 200,
+             "blocks": [[0, -60, 0, 1]]})
+    direct = subprocess.run([cfg.binary, "12345", "0", "0", "200", "200",
+                             "0,-60,0:1"], cwd=ROOT, capture_output=True)
+    check("area below the sample budget is counted exactly",
+          e["exact"] and e["hits"] == direct.stdout.count(b"@"))
+
     # 5. the viewer. Deliberately non-square and off-origin: a transposed or
     #    misplaced image would still have the right density, so compare the lit
     #    pixels against the columns the CLI actually reports.
@@ -436,6 +585,9 @@ def main():
     ap.add_argument("--bin", dest="binary", default=os.path.join(ROOT, "gpbpf"))
     ap.add_argument("--max-area", type=int, default=2_000_000_000,
                     help="reject searches wider than this many columns")
+    ap.add_argument("--sample-columns", dest="sample", type=int,
+                    default=100_000_000,
+                    help="column budget for the measured match-rate estimate")
     ap.add_argument("--timeout", type=float, default=300.0)
     ap.add_argument("--open", action="store_true", help="open a browser")
     ap.add_argument("--verbose", action="store_true")
