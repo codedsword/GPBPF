@@ -176,11 +176,11 @@ kbd {
 	padding: 0 .3rem; margin-left: .15rem;
 }
 
-/* overrides label's display:block -- this one is a checkbox caption, not a
- * field label above an input */
-.opt { display: flex; align-items: center; gap: .4rem; margin: .6rem 0 0; color: var(--text); cursor: pointer; }
-.opt input { accent-color: var(--accent); margin: 0; }
-.opt small { color: var(--dim); }
+select {
+	background: var(--sunk); color: var(--text); font: inherit;
+	border: 1px solid var(--edge); padding: .15rem;
+}
+.field select { flex: 1; min-width: 0; }
 
 .est { margin-top: .6rem; padding: .5rem .6rem; background: var(--sunk); border-left: 3px solid var(--accent); }
 .est.warn { border-color: var(--warn); }
@@ -225,10 +225,6 @@ tbody tr.on { background: #2c3a22; }
 #view.drag { cursor: grabbing; }
 .viewbar { display: flex; gap: .6rem; align-items: center; margin-top: .6rem; flex-wrap: wrap; font-size: .92rem; }
 .viewbar .at { color: var(--dim); font-family: ui-monospace, monospace; }
-.viewbar select {
-	background: var(--sunk); color: var(--text); font: inherit;
-	border: 1px solid var(--edge); padding: .15rem;
-}
 
 footer { padding: .55rem 1.2rem; background: var(--panel); border-top: 2px solid var(--lo); }
 #cli {
@@ -354,10 +350,14 @@ details pre { background: var(--sunk); padding: .55rem; overflow: auto; border: 
 			<span><i class="cell"></i>any <kbd>middle</kbd></span>
 		</div>
 
-		<label class="opt" for="rot">
-			<input type="checkbox" id="rot">
-			Match any rotation <small>— scans all four 90° turns</small>
-		</label>
+		<div class="field">
+			<label for="rot">Scan</label>
+			<select id="rot" title="how many orientations of this pattern to search for">
+				<option value="1">as drawn only</option>
+				<option value="2">as drawn + 180° (same axis)</option>
+				<option value="4">all four 90° turns</option>
+			</select>
+		</div>
 
 		<div class="est" id="est"></div>
 		<button class="go" id="run">Search</button>
@@ -452,7 +452,7 @@ const S = {
 	layers: [{ y: -60, cells: [] }],
 	active: 0,
 	w: 5, h: 5,
-	rot: false,
+	rot: 1,          /* orientations to scan: 1, 2 (0°+180°) or 4 */
 	view: { y: -60, x0: -32, z0: -32, scale: 6 },
 	sample: null, sampleErr: false,
 	res: null, sel: -1,
@@ -528,13 +528,17 @@ function blocks(r) {
 	return out;
 }
 
-/* One scan per orientation. A pattern that maps onto itself under a turn --
- * anything with rotational symmetry, and every 1x1 -- is dropped here instead
- * of scanned twice, which would otherwise report its matches two or four times
- * over. The binary ignores block order, so a sorted join identifies a set. */
+/* One scan per orientation. S.rot orientations, spread evenly over the circle:
+ * 2 means 0° and 180°, for a formation whose axis you can read off a screenshot
+ * but whose direction you cannot.
+ *
+ * A pattern that maps onto itself under a turn -- anything with rotational
+ * symmetry, and every 1x1 -- is dropped here instead of scanned twice, which
+ * would otherwise report its matches two or four times over. The binary ignores
+ * block order, so a sorted join identifies a set. */
 function patterns() {
 	const seen = new Map();
-	for (let r = 0; r < (S.rot ? 4 : 1); r++) {
+	for (let r = 0; r < 4; r += 4 / S.rot) {
 		const b = blocks(r), k = String([...b].sort());
 		if (!seen.has(k)) seen.set(k, { r, b });
 	}
@@ -1097,10 +1101,11 @@ function load() {
 		return false;
 	S.seedText = d.seed; S.w = d.w; S.h = d.h; S.layers = d.layers;
 	S.active = Math.min(d.active || 0, d.layers.length - 1);
-	S.rot = !!d.rot;
+	/* this was a boolean before 0°+180° became an option of its own */
+	S.rot = d.rot === true ? 4 : d.rot === 2 || d.rot === 4 ? d.rot : 1;
 	if (d.view) S.view = d.view;
 	$("seed").value = d.seed;
-	$("rot").checked = S.rot;
+	$("rot").value = S.rot;
 	$("gw").value = S.w; $("gh").value = S.h;
 	if (d.b) { $("x0").value = d.b.x0; $("z0").value = d.b.z0; $("x1").value = d.b.x1; $("z1").value = d.b.z1; }
 	return true;
@@ -1141,7 +1146,7 @@ $("addcustom").onclick = () => {
 	const y = +$("customy").value | 0;
 	if (Number.isFinite(y)) addLayer(y);
 };
-$("rot").onchange = () => { S.rot = $("rot").checked; renderAll(); };
+$("rot").onchange = () => { S.rot = +$("rot").value; renderAll(); };
 $("run").onclick = search;
 $("copycli").onclick = () => {
 	const a = argvs();
