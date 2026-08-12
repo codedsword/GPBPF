@@ -96,7 +96,8 @@ label { display: block; font-size: .85rem; color: var(--dim); margin-bottom: .2r
  * label is fixed-width so inputs line up down the card. */
 .field { display: flex; align-items: center; gap: .45rem; margin-top: .45rem; }
 .field > label { margin: 0; flex: 0 0 auto; }
-.field > label:first-child { flex: 0 0 3.4rem; }
+/* wide enough for the longest of them ("Timeout") so none wrap or spill */
+.field > label:first-child { flex: 0 0 4.2rem; }
 .field input { flex: 1; min-width: 0; }
 .sep { color: var(--dim); }
 .hint { font-size: .85rem; color: var(--dim); margin-top: .3rem; }
@@ -300,6 +301,7 @@ details pre { background: var(--sunk); padding: .55rem; overflow: auto; border: 
 		<h3 id="mtitle">Searching…</h3>
 		<div class="spin" id="mspin"><i></i><i></i><i></i><i></i></div>
 		<div class="why" id="mbody"></div>
+		<button id="mcancel">Cancel search</button>
 		<button id="mclose" class="hide">Close</button>
 	</div>
 </div>
@@ -376,6 +378,12 @@ details pre { background: var(--sunk); padding: .55rem; overflow: auto; border: 
 				<option value="2">as drawn + 180° (same axis)</option>
 				<option value="4">all four 90° turns</option>
 			</select>
+		</div>
+		<div class="field">
+			<label for="tmo">Timeout</label>
+			<input type="number" id="tmo" value="300" min="1" max="86400"
+			       title="give up on the whole search after this many seconds">
+			<span class="sep">s</span>
 		</div>
 
 		<div class="est" id="est"></div>
@@ -853,8 +861,10 @@ function renderCli() {
 
 function reqBody(limit) {
 	const s = seedValue(), b = bounds();
+	/* null while the field is half-typed, which the server reads as "your
+	 * default" rather than as an instruction */
 	return { seed: s.n, fromX: b.x0, fromZ: b.z0, toX: b.x1, toZ: b.z1,
-	         patterns: patterns().map((p) => p.b), limit };
+	         patterns: patterns().map((p) => p.b), timeout: numOf("tmo"), limit };
 }
 
 /* The search is one blocking request that can run for tens of seconds over a
@@ -865,13 +875,30 @@ function modal(title, body, done) {
 	$("mbody").innerHTML = body;
 	$("mspin").classList.toggle("hide", done);
 	$("mclose").classList.toggle("hide", !done);
-	if (done) $("mclose").focus();
+	$("mcancel").classList.toggle("hide", done);
+	$(done ? "mclose" : "mcancel").focus();
 }
 const modalDone = () => !$("mclose").classList.contains("hide");
 function modalClose() { $("modal").classList.add("hide"); }
 
+/* Cancelling has to reach the server: the page dropping the request would stop
+ * the waiting but leave the binary running to completion. So name the request
+ * and ask, over a second connection, for that name to be killed. */
+let job = null;
+$("mcancel").onclick = () => {
+	$("mcancel").disabled = true;
+	$("mtitle").textContent = "Cancelling…";
+	if (job) fetch("/api/cancel", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ job }),
+	}).catch(() => { /* the search's own response is what closes the modal */ });
+};
+
 $("mclose").onclick = modalClose;
-/* only dismissable once the search has finished -- there is nothing to cancel */
+/* Escape and the backdrop dismiss a finished search. Neither cancels a running
+ * one: losing a ten-minute search to a stray keypress is the worse mistake, so
+ * stopping it is the button and only the button. */
 $("modal").onclick = (ev) => { if (ev.target === $("modal") && modalDone()) modalClose(); };
 addEventListener("keydown", (ev) => { if (ev.key === "Escape" && modalDone()) modalClose(); });
 
@@ -880,16 +907,25 @@ async function search() {
 	btn.disabled = true;
 	btn.textContent = "Searching…";
 	$("rbanner").innerHTML = "";
+	job = "j" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+	$("mcancel").disabled = false;
 	modal("Searching…", "<b>" + human(est.area) + "</b> columns · ≈ <b>"
 		+ human(est.n) + "</b> matches expected", false);
 	try {
 		const r = await fetch("/api/search", {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify(reqBody(2000)),
+			body: JSON.stringify(Object.assign(reqBody(2000), { job })),
 		});
 		const d = await r.json();
 		if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
+		if (d.cancelled) {
+			modal("Cancelled", "Nothing was searched. The previous results are "
+				+ "still below.", true);
+			btn.textContent = "Search";
+			renderEstimate();
+			return;
+		}
 		S.res = d;
 		/* which turn each pattern index was, frozen with the result: the grid
 		 * can be edited afterwards, the matches on screen cannot */
@@ -1108,7 +1144,7 @@ function save() {
 	try {
 		localStorage.setItem("gpbpf2", JSON.stringify({
 			seed: S.seedText, w: S.w, h: S.h, layers: S.layers, active: S.active,
-			rot: S.rot, b: bounds(), view: S.view,
+			rot: S.rot, tmo: $("tmo").value, b: bounds(), view: S.view,
 		}));
 	} catch (e) { /* private mode, quota -- losing autosave is not worth a dialog */ }
 }
@@ -1125,6 +1161,7 @@ function load() {
 	if (d.view) S.view = d.view;
 	$("seed").value = d.seed;
 	$("rot").value = S.rot;
+	if (d.tmo) $("tmo").value = d.tmo;
 	$("gw").value = S.w; $("gh").value = S.h;
 	if (d.b) { $("x0").value = d.b.x0; $("z0").value = d.b.z0; $("x1").value = d.b.x1; $("z1").value = d.b.z1; }
 	return true;
@@ -1166,6 +1203,9 @@ $("addcustom").onclick = () => {
 	if (Number.isFinite(y)) addLayer(y);
 };
 $("rot").onchange = () => { S.rot = +$("rot").value; renderAll(); };
+/* the binary has no timeout of its own, so this changes neither the estimate
+ * nor the command line -- only how long the server waits */
+$("tmo").oninput = save;
 $("run").onclick = search;
 $("copycli").onclick = () => {
 	const a = argvs();

@@ -114,6 +114,19 @@ cannot turn a ten-second search into an all-day one. Raise it with:
 make web AREA=20000000000          # or: python3 web/serve.py --max-area 20000000000
 ```
 
+A running search can be stopped from the progress box. **Cancel search** kills
+the binary rather than only closing the connection — a search holds its handler
+thread for as long as `gpbpf` runs, so the page names each request and asks
+`POST /api/cancel` to kill that name over a second connection. Dropping the
+request browser-side would stop the waiting and leave the GPU working.
+
+A run also gives up after **Timeout** seconds, which is a field in the Pattern
+card rather than a server flag — a scan that needs longer gets it without a
+restart. `--timeout` sets what that field starts at (300s). The budget covers
+the whole request, so scanning four orientations shares it instead of taking
+four times as long, and a run that exceeds it says *timed out* rather than
+reporting the SIGKILL as `gpbpf exited -9`.
+
 ```sh
 make webtest  # server results must equal the CLI's, byte for byte
 ```

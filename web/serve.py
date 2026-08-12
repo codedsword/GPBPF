@@ -40,6 +40,9 @@ MAX_PATTERNS = 4
 # Bound one viewer request. 512*512 columns is ~1 ms of actual search.
 MAX_VIEW = 512
 MAX_BODY = 1 << 20
+# Ceiling on a GUI-supplied timeout. --timeout sets the default; this only stops
+# a request asking to hold a process open indefinitely.
+MAX_TIMEOUT = 86400
 
 # main.c:549 prints this after the last match; its absence means the run died.
 SENTINEL = b"search finished\n"
@@ -52,6 +55,53 @@ VIEW_FG = 0xB4
 
 class BadRequest(Exception):
     pass
+
+
+# Cancellable requests, by the name the client gave them. A search holds a
+# handler thread for as long as the binary runs, so cancelling has to arrive on
+# another connection and reach across to kill the process -- dropping the fetch
+# browser-side would only stop the waiting, not the work.
+JOBS = {}
+JOBS_LOCK = threading.Lock()
+JOB_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def job_of(d):
+    """The client's name for this request, or None if it did not name one."""
+    j = d.get("job")
+    if j is None:
+        return None
+    if not isinstance(j, str) or not JOB_RE.match(j):
+        raise BadRequest("job: expected 1-64 chars of [A-Za-z0-9_-]")
+    return j
+
+
+def job_start(jid):
+    if not jid:
+        return None
+    rec = {"procs": set(), "cancelled": False}
+    with JOBS_LOCK:
+        JOBS[jid] = rec
+    return rec
+
+
+def job_end(jid):
+    if jid:
+        with JOBS_LOCK:
+            JOBS.pop(jid, None)
+
+
+def job_cancel(jid):
+    """-> True if a live request was found. Unknown means already finished."""
+    with JOBS_LOCK:
+        rec = JOBS.get(jid)
+        if rec is None:
+            return False
+        rec["cancelled"] = True
+        procs = list(rec["procs"])
+    for p in procs:
+        p.kill()  # no-op once it has exited
+    return True
 
 
 def as_int(v, lo, hi, name):
@@ -132,11 +182,33 @@ def parse_search(d, cfg):
     return argvs, area
 
 
-def spawn(argv, cfg):
+def deadline_from(d, cfg):
+    """Absolute time this request has to be finished by.
+
+    One deadline per request, not per process: a four-orientation search shares
+    the budget rather than being granted it four times over, so the number in
+    the GUI is the wall time the whole thing can take.
+    """
+    t = d.get("timeout")
+    secs = int(cfg.timeout) if t is None else as_int(t, 1, MAX_TIMEOUT, "timeout")
+    return time.monotonic() + secs
+
+
+def spawn(argv, deadline, rec=None):
     """Popen + a watchdog. Never shell=True; argv is validated integers."""
     p = subprocess.Popen(argv, cwd=ROOT, stdout=subprocess.PIPE,
                          stderr=subprocess.PIPE)
-    killer = threading.Timer(cfg.timeout, p.kill)
+    if rec is not None:
+        # publish it, then re-check: a cancel landing between Popen and here
+        # would otherwise find an empty set and leave this one running
+        with JOBS_LOCK:
+            rec["procs"].add(p)
+            missed = rec["cancelled"]
+        if missed:
+            p.kill()
+    # a deadline already past still gets a moment, so the failure is a timeout
+    # rather than a race against process startup
+    killer = threading.Timer(max(0.1, deadline - time.monotonic()), p.kill)
     killer.daemon = True
     killer.start()
     # stderr must be drained concurrently or a full pipe deadlocks the stdout
@@ -147,11 +219,11 @@ def spawn(argv, cfg):
     return p, killer, err, t
 
 
-def run_search(argv, cfg, limit):
+def run_search(argv, limit, deadline, rec=None):
     """-> (matches, count, elapsed, warnings). Output can be hundreds of MB, so
     only the first `limit` lines are parsed; the rest are counted and dropped."""
     t0 = time.monotonic()
-    p, killer, err, errt = spawn(argv, cfg)
+    p, killer, err, errt = spawn(argv, deadline, rec)
     matches, nl, tail, last, parsing = [], 0, b"", b"", True
     try:
         while True:
@@ -185,6 +257,11 @@ def run_search(argv, cfg, limit):
     stderr = (err[0] if err else b"").decode("utf-8", "replace")
     warnings = [l for l in stderr.splitlines() if l.strip()]
     if rc != 0 or not last.endswith(SENTINEL):
+        # the watchdog is the only thing that kills the process, so a run that
+        # died past its deadline died of the timeout. Say that, rather than
+        # leaving the page to report SIGKILL as "gpbpf exited -9".
+        if time.monotonic() >= deadline:
+            raise RuntimeError("timed out: raise Timeout, or search a smaller area")
         raise RuntimeError("gpbpf exited %d%s" % (rc, ": " + stderr if stderr else ""))
     return matches, nl - 1, time.monotonic() - t0, warnings
 
@@ -218,7 +295,7 @@ def render_view(q, cfg):
     argvs, _ = parse_search({"seed": q.get("seed"), "fromX": x0, "fromZ": z0,
                              "toX": x0 + w, "toZ": z0 + h,
                              "blocks": [[0, y, 0, 1]]}, cfg)
-    matches, _, _, _ = run_search(argvs[0], cfg, w * h)
+    matches, _, _, _ = run_search(argvs[0], w * h, deadline_from({}, cfg))
 
     px = bytearray(w * h * 2)  # zero-filled == fully transparent
     for x, z, _ in matches:
@@ -263,7 +340,7 @@ def sample_rect(x0, z0, w, h, budget):
     return x0 + (w - sw) // 2, z0, sw, h
 
 
-def sample_rate(argvs, cfg, x0, z0, w, h, area):
+def sample_rate(argvs, cfg, x0, z0, w, h, area, deadline):
     """Measure the real match rate on a sub-rectangle of the search.
 
     Multiplying the per-layer probabilities assumes the blocks are independent,
@@ -285,7 +362,7 @@ def sample_rate(argvs, cfg, x0, z0, w, h, area):
         hits, warn = 0, []
         for argv in argvs:
             a = argv[:2] + [str(sx), str(sz), str(sx + sw), str(sz + sh)] + argv[6:]
-            _, n, _, ws = run_search(a, cfg, 1)
+            _, n, _, ws = run_search(a, 1, deadline)
             hits += n
             warn += [s for s in ws if s not in warn]
         return sw * sh, hits, warn
@@ -342,7 +419,7 @@ def make_handler(cfg):
                 self._json(404, {"error": "not found"})
 
         def do_POST(self):
-            if self.path not in ("/api/search", "/api/estimate"):
+            if self.path not in ("/api/search", "/api/estimate", "/api/cancel"):
                 return self._json(404, {"error": "not found"})
             # Requiring JSON forces a CORS preflight we never answer, so a page
             # on another origin cannot drive this server. Impact would be low
@@ -356,7 +433,15 @@ def make_handler(cfg):
             raw = self.rfile.read(n)
             if self.path == "/api/estimate":
                 return self._guard(lambda: self._estimate(raw))
+            if self.path == "/api/cancel":
+                return self._guard(lambda: self._cancel(raw))
             self._guard(lambda: self._search(raw))
+
+        def _cancel(self, raw):
+            jid = job_of(self._body(raw))
+            if not jid:
+                raise BadRequest("job: required")
+            self._json(200, {"cancelled": job_cancel(jid)})
 
         def _estimate(self, raw):
             """Expected match count, measured rather than modelled."""
@@ -364,7 +449,8 @@ def make_handler(cfg):
             argvs, area = parse_search(d, cfg)
             x0, z0, x1, z1 = (int(v) for v in argvs[0][2:6])
             t0 = time.monotonic()
-            n, hits, warn = sample_rate(argvs, cfg, x0, z0, x1 - x0, z1 - z0, area)
+            n, hits, warn = sample_rate(argvs, cfg, x0, z0, x1 - x0, z1 - z0,
+                                        area, deadline_from(d, cfg))
             rate = hits / float(n)
             exp = rate * area
             if hits:  # Poisson interval on the observed count
@@ -390,15 +476,27 @@ def make_handler(cfg):
             d = self._body(raw)
             limit = as_int(d.get("limit", 5000), 1, 200000, "limit")
             argvs, area = parse_search(d, cfg)
+            deadline = deadline_from(d, cfg)
+            jid = job_of(d)
+            rec = job_start(jid)
             matches, count, elapsed, warnings = [], 0, 0.0, []
-            for i, argv in enumerate(argvs):
-                ms, c, el, warn = run_search(argv, cfg, limit)
-                # tagged with which pattern hit, so the page can draw the match
-                # in the orientation that actually matched
-                matches += [m + [i] for m in ms]
-                count += c
-                elapsed += el
-                warnings += [s for s in warn if s not in warnings]
+            try:
+                for i, argv in enumerate(argvs):
+                    ms, c, el, warn = run_search(argv, limit, deadline, rec)
+                    # tagged with which pattern hit, so the page can draw the
+                    # match in the orientation that actually matched
+                    matches += [m + [i] for m in ms]
+                    count += c
+                    elapsed += el
+                    warnings += [s for s in warn if s not in warnings]
+            except RuntimeError:
+                # a killed process is how a cancel surfaces; anything else is a
+                # real failure and still belongs in the error path
+                if not (rec and rec["cancelled"]):
+                    raise
+                return self._json(200, {"cancelled": True})
+            finally:
+                job_end(jid)
             # each scan comes back x-major/z-minor; merge back into that order
             # so the joined list reads like a single scan's does
             matches.sort()
@@ -417,6 +515,7 @@ def make_handler(cfg):
             if not isinstance(d, dict):
                 raise BadRequest("q must be an object")
             argvs, _ = parse_search(d, cfg)
+            deadline = deadline_from(d, cfg)
             name = "gpbpf-%s-%s_%s-%s_%s.txt" % tuple(argvs[0][1:6])
 
             self.send_response(200)
@@ -429,7 +528,7 @@ def make_handler(cfg):
             # One scan per orientation, back to back. Each ends with the
             # binary's own "search finished", which delimits them.
             for argv in argvs:
-                p, killer, _err, _t = spawn(argv, cfg)
+                p, killer, _err, _t = spawn(argv, deadline)
                 try:
                     while True:
                         chunk = p.stdout.read1(1 << 20)
@@ -482,14 +581,17 @@ def selftest(cfg):
         print("  %-46s %s" % (name, "ok" if cond else "FAIL"))
         ok[0] += 0 if cond else 1
 
-    def post(body):
-        req = urllib.request.Request(base + "/api/search",
+    def post_to(path, body):
+        req = urllib.request.Request(base + path,
                                      data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json"})
         try:
             return json.loads(urllib.request.urlopen(req).read()), 200
         except urllib.error.HTTPError as e:
             return json.loads(e.read()), e.code
+
+    def post(body):
+        return post_to("/api/search", body)
 
     print("web selftest: %s" % cfg.binary)
 
@@ -551,7 +653,68 @@ def selftest(cfg):
                     "patterns": turns * 2})
     check("too many patterns rejected", code == 400)
 
-    # 7. the measured estimate. The point of it is the multi-layer case, where
+    # 7. the request-supplied timeout, and that it bounds the whole request
+    #    rather than each scan in it. Asserted on the watchdog's own interval
+    #    rather than by racing two searches: how long a scan takes varies with
+    #    GPU clocks and page cache, and a threshold tuned to it would either
+    #    flake or stop discriminating on a faster machine.
+    trivial = [cfg.binary, "1", "0", "0", "2", "2", "0,-60,0:1"]
+    shared = time.monotonic() + 10
+    started = [spawn(trivial, shared)]
+    time.sleep(0.5)
+    started.append(spawn(trivial, shared))
+    budgets = [s[1].interval for s in started]
+    for p, killer, _e, _t in started:
+        killer.cancel()
+        p.stdout.close()
+        p.stderr.close()
+        p.wait()
+    check("scans share one deadline (%.2fs left, then %.2fs)" % tuple(budgets),
+          budgets[1] < budgets[0] - 0.4)
+
+    # a fifth of 1.9e9 columns is ~390M matches, so this cannot finish inside a
+    # second on any hardware -- no margin to tune, and the point is the wording
+    huge = {"seed": 12345, "fromX": 0, "fromZ": 0, "toX": 44000, "toZ": 44000,
+            "patterns": [[[0, -60, 0, 1]]], "limit": 5, "timeout": 1}
+    got, code = post(huge)
+    check("past its budget it times out, and says so (%s)" % got.get("error"),
+          code == 500 and "timed out" in got.get("error", ""))
+    _, code = post(dict(huge, timeout=0))
+    check("out-of-range timeout rejected", code == 400)
+
+    # 8. cancelling. A single permissive block over the whole area emits a few
+    #    hundred million lines, so it runs long enough to be interrupted; the
+    #    point is that the request comes back promptly and that the process is
+    #    really gone, not just no longer being waited on.
+    jid = "selftest-cancel"
+    forever = {"seed": 12345, "fromX": 0, "fromZ": 0, "toX": 44000, "toZ": 44000,
+               "patterns": [[[0, -60, 0, 1]]], "limit": 5, "timeout": 600,
+               "job": jid}
+    out = {}
+    runner = threading.Thread(target=lambda: out.update(zip(("d", "code"),
+                                                           post(forever))))
+    runner.start()
+    time.sleep(1.0)
+    with JOBS_LOCK:
+        pids = [p.pid for p in JOBS.get(jid, {"procs": ()})["procs"]]
+    t0 = time.monotonic()
+    got, code = post_to("/api/cancel", {"job": jid})
+    runner.join(20)
+    took = time.monotonic() - t0
+    check("cancel returns the search in %.2fs, still running: %s"
+          % (took, bool(pids)),
+          bool(pids) and code == 200 and got["cancelled"]
+          and out.get("d", {}).get("cancelled") is True and took < 5)
+    check("the binary is actually dead, not just unwaited-on",
+          all(not os.path.exists("/proc/%d/task" % pid) or
+              open("/proc/%d/stat" % pid).split()[2] in ("Z", "X")
+              for pid in pids))
+    check("cancelling an unknown job is not an error",
+          post_to("/api/cancel", {"job": "no-such-job"}) == ({"cancelled": False}, 200))
+    _, code = post_to("/api/cancel", {"job": "bad id!"})
+    check("malformed job name rejected", code == 400)
+
+    # 8. the measured estimate. The point of it is the multi-layer case, where
     #    multiplying per-layer probabilities is 3.6x low, so check the sampled
     #    interval actually brackets the true count from a full search.
     def est(body):
