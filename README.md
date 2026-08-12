@@ -63,7 +63,8 @@ gpbpf 12345 0 0 20000 20000 0,-60,0:1 1,-60,0:1 0,-60,1:1
 ## Web GUI
 
 screenshot: 
-<img width="1918" height="895" alt="image" src="https://github.com/user-attachments/assets/2d7d407c-a2b1-48ca-a7cd-b8270a101ec8" />
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/7b7cd22d-af3b-405f-baf0-f035add69aa6" />
+
 
 
 ```sh
