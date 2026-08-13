@@ -28,7 +28,7 @@ Java implementation the generator originally came from, and verified on every
 build since. Nothing external is needed to run it:
 
 ```sh
-make test        # 22 cases + fp_proof. Only needs the binary and python3.
+make test        # 24 cases + fp_proof. Only needs the binary and python3.
 ```
 
 A red gate means one of two things, and they are not interchangeable:
@@ -120,12 +120,27 @@ open to redesign. All are commented in the source; this is the short list.
    |x| ≈ 686, which is why the harness tests coordinates out there.
 2. **`nextFloat()` stays single precision.** `next(24)` is exactly representable
    in binary32 and the multiplier is exactly 2⁻²⁴, so the multiply only adjusts
-   the exponent. Widening to double before the multiply changes results.
+   the exponent — it is exact, and *because* it is exact, widening to double and
+   rounding back cannot change it (enumerated: 0 of 2²⁴ draws differ, with either
+   the exact 2⁻²⁴ or the decimal literal). Keep it in float anyway: it is what
+   the generator specifies, it is free, and the moment the multiplier or the
+   shift changes, the exactness argument goes with it and double stops being
+   equivalent.
 3. **The float comparison in `bd_probe`.** The generator specifies
    `(double)nextFloat() < p`; we compare in float. That narrowing is licensed by
    exhaustion, not by argument: `tools/fp_proof.c` enumerates all 2²⁴ possible
    draws against all four reachable probabilities. **If `fp_proof` ever fails,
    revert `bd_probe` to `(double)f < p`** rather than adjusting the proof.
+
+   `fp_proof` licenses the *precision* of that comparison and nothing else — it
+   has no opinion on the operator. The strictness is pinned separately, by the
+   two `float compare boundary` vectors, and it is a live concern rather than a
+   theoretical one: `nextFloat()` returns k·2⁻²⁴, and p=0.8 and p=0.6 are
+   themselves exact multiples of 2⁻²⁴ (13421773 and 10066330), so a draw can land
+   exactly *on* p. p=0.4 and p=0.2 cannot. Seed 12345 does it at (269, 4168) for
+   `y=-63` and (1533, 851) for `y=-62`. Turning `<` into `<=` looks like fixing
+   an off-by-one, changes real output, and passed every other gate in this repo
+   before those vectors existed.
 4. **The two derivers in `derive()`** (`main.c`). Steps 1 and 4 are different
    entry points — step 1 runs the world seed through splitmix64, step 4 uses the
    two-argument constructor and does not. Routing both through one helper looks

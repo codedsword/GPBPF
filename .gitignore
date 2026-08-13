@@ -58,3 +58,11 @@ dkms.conf
 /gpbpf
 /fp_proof
 /gpbpf_cpu
+
+# graphify extraction cache: content-hash keyed scratch, rebuilt on demand.
+# The graph itself (graph.json, GRAPH_REPORT.md, graph.html) is kept, so a
+# fresh clone can query it without re-extracting.
+/graphify-out/cache/
+# absolute paths to this machine's interpreter and checkout; re-resolved per host
+/graphify-out/.graphify_python
+/graphify-out/.graphify_root

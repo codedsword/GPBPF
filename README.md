@@ -183,16 +183,19 @@ counted and the figure is exact, not estimated.
 make test     # runs ./fp_proof, then tools/check.py
 ```
 
-22 cases pinning the generator: both probability bands, every band edge, the
+24 cases pinning the generator: both probability bands, every band edge, the
 always-bedrock early returns, negative and past-wrap coordinates, extreme seeds,
-`pattern/*.txt` versus equivalent explicit block args, output ordering, and the
-distance field at extreme coordinates. Needs nothing but the built binary and
+`pattern/*.txt` versus equivalent explicit block args, output ordering, the
+distance field at extreme coordinates, and the two columns where `nextFloat()`
+lands exactly on the probability. Needs nothing but the built binary and
 python3 — no Java, no network, no second checkout.
 
 The expected results live in `tools/vectors.json` as match counts and SHA-256
-digests. They were captured from a build that passed a 22-case cross-check
+digests. Most were captured from a build that passed a 22-case cross-check
 against the Java implementation the generator was originally derived from; the
-provenance block in that file records the reference commit. **A diff against
+provenance block in that file records the reference commit, and also records
+which cases were added afterwards and how those were established instead.
+**A diff against
 them is a bug here, not a stale vector.** Re-record only when you have
 independently established the new output is right — "the gate is red and I want
 it green" is not that.
@@ -223,6 +226,13 @@ the vectors include coordinates past |x| ≈ 686:
 the multiplier is exactly 2⁻²⁴, so the multiply only adjusts the exponent. The
 build passes `-ffp-contract=off` / `--fmad=false` so no FMA contraction can
 change a rounding. **Never** add `--use_fast_math`.
+
+The comparison's *strictness* is a separate question from its precision, and
+`fp_proof` only answers the second. `nextFloat()` returns k·2⁻²⁴ and two of the
+four probabilities — 0.8 and 0.6 — are exact multiples of 2⁻²⁴, so a draw can
+land exactly on p and `<` versus `<=` becomes observable. Seed 12345 does it at
+(269, 4168) on `y=-63`. Two vectors pin that; before they existed, flipping the
+operator passed the entire gate.
 
 The generator specifies the comparison in double; `bd_probe` does it in float.
 That is a narrowing, so it is licensed by exhaustion rather than by argument:

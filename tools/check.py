@@ -61,6 +61,16 @@ CASES = [
     # The only case that looks at the distance field. hypot exceeds INT_MAX
     # here, where Java's (int) narrowing saturates and C's is undefined.
     ("hypot clamp at INT_MAX",          "full",   ["12345", "2147483600", "2147483600", "2147483610", "2147483610", "0,-60,0:1"]),
+    # bd_probe's `<` must not become `<=`. nextFloat() returns k*2^-24, so the
+    # operator is only observable where p is itself an exact multiple of 2^-24:
+    # p=0.8 is 13421773*2^-24 and p=0.6 is 10066330*2^-24, while p=0.4 and p=0.2
+    # are not, so only these two layers can ever sit on the boundary. Each window
+    # holds one column that lands exactly on p -- (269,4168) and (1533,851) --
+    # which must stay absent, plus ~100 ordinary matches so the digest fails just
+    # as loudly if the comparison flips the other way. Without these, changing
+    # `<` to `<=` passed all 22 remaining vectors and fp_proof.
+    ("float compare boundary p=0.8",    "sorted", ["12345", "265", "4160", "275", "4180", "0,-63,0:1"]),
+    ("float compare boundary p=0.6",    "sorted", ["12345", "1530", "845", "1540", "860", "0,-62,0:1"]),
 ]
 
 

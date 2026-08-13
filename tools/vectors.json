@@ -2,6 +2,7 @@
  "provenance": {
   "recorded": "2026-08-12",
   "how": "Captured from a build that passed the 22-case cross-check against the Java implementation these vectors originally came from, at reference commit 726af429711759e41a32111b33e6c1327f025838. That harness has since been removed: the generator is pinned by these vectors now, and the project no longer depends on the original to build or test.",
+  "added-2026-08-13": "The two 'float compare boundary' cases were added later and never saw that cross-check, so their expected values were established from the semantics instead of from our own output. p=0.8 and p=0.6 are exact multiples of 2^-24 (13421773 and 10066330), so nextFloat() can land exactly on them; p=0.4 and p=0.2 cannot. Java evaluates (double)nextFloat() < p and we evaluate f < p -- both comparisons are strict, so a draw landing exactly on p is a non-match either way, independent of the narrowing. Columns (269,4168) at y=-63 and (1533,851) at y=-62 are such draws for seed 12345 and must stay absent. Verified load-bearing by mutation: changing bd_probe's `<` to `<=` passes every other case here and fp_proof, and fails these two.",
   "warning": "A diff against these is a bug in this repo. Do not re-record to make a red gate green -- see the header of tools/check.py."
  },
  "cases": {
@@ -284,6 +285,32 @@
    ],
    "matches": 24,
    "sha256": "0a19b0bdf46ca4ee04a2f9b744ba360825205f20e8a1e28034706d2e3a940286"
+  },
+  "float compare boundary p=0.8": {
+   "mode": "sorted",
+   "args": [
+    "12345",
+    "265",
+    "4160",
+    "275",
+    "4180",
+    "0,-63,0:1"
+   ],
+   "matches": 157,
+   "sha256": "e6885a6e72fc71c9400a44b243c4b37596c7141b731ab5ba48d4ce98db8ebd74"
+  },
+  "float compare boundary p=0.6": {
+   "mode": "sorted",
+   "args": [
+    "12345",
+    "1530",
+    "845",
+    "1540",
+    "860",
+    "0,-62,0:1"
+   ],
+   "matches": 88,
+   "sha256": "8fda199e2fd7456a343674e4943f513d25bddb4b1fa4bc87bf214e44ea8fd63d"
   }
  }
 }

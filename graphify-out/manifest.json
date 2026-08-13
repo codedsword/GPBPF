@@ -1,0 +1,52 @@
+{
+  "bedrock.h": {
+    "mtime": 1786535180.1591332,
+    "ast_hash": "41885d0845e9ae80868009693ab1e908",
+    "semantic_hash": "41885d0845e9ae80868009693ab1e908"
+  },
+  "main.c": {
+    "mtime": 1786535180.1588764,
+    "ast_hash": "f472fc8b0bd574b9aaa8a2670f2b62fb",
+    "semantic_hash": "f472fc8b0bd574b9aaa8a2670f2b62fb"
+  },
+  "search.cu": {
+    "mtime": 1786516276.3549058,
+    "ast_hash": "bc4b4a79f28b563a7ff0edfa7de04d1d",
+    "semantic_hash": "bc4b4a79f28b563a7ff0edfa7de04d1d"
+  },
+  "tools/check.py": {
+    "mtime": 1786570969.594661,
+    "ast_hash": "42c03924b402bf82c0f17d0c9e61a21d",
+    "semantic_hash": "42c03924b402bf82c0f17d0c9e61a21d"
+  },
+  "tools/fp_proof.c": {
+    "mtime": 1786368385.358107,
+    "ast_hash": "425366b913a266c3eec7488db35c619c",
+    "semantic_hash": "425366b913a266c3eec7488db35c619c"
+  },
+  "tools/vectors.json": {
+    "mtime": 1786571009.6598878,
+    "ast_hash": "fa627ac77b4ddafd9f9782231c3a21fd",
+    "semantic_hash": "fa627ac77b4ddafd9f9782231c3a21fd"
+  },
+  "web/serve.py": {
+    "mtime": 1786566660.6578321,
+    "ast_hash": "0da41cabaefbd3ca145ce977f5de4bf8",
+    "semantic_hash": "0da41cabaefbd3ca145ce977f5de4bf8"
+  },
+  "CONTRIBUTING.md": {
+    "mtime": 1786571050.9041214,
+    "ast_hash": "cdd270392fae49458a5c792ad7ec5d86",
+    "semantic_hash": "cdd270392fae49458a5c792ad7ec5d86"
+  },
+  "README.md": {
+    "mtime": 1786571074.7952566,
+    "ast_hash": "1b62cc48a684930d7f34e628ea662292",
+    "semantic_hash": "1b62cc48a684930d7f34e628ea662292"
+  },
+  "web/index.html": {
+    "mtime": 1786566543.862884,
+    "ast_hash": "f75b253c04163a3b9e908f7470fbcda6",
+    "semantic_hash": "f75b253c04163a3b9e908f7470fbcda6"
+  }
+}
