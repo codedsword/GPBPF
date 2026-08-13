@@ -12,6 +12,7 @@ point of this design: the GUI must never become a reason to weaken parity.
 Stdlib only. python3 is already required by this repo (tools/verify.sh).
 """
 import argparse
+import io
 import json
 import math
 import os
@@ -47,6 +48,8 @@ MAX_TIMEOUT = 86400
 # main.c:549 prints this after the last match; its absence means the run died.
 SENTINEL = b"search finished\n"
 MATCH_RE = re.compile(rb"^@(-?\d+);(-?\d+) \((\d+) blocks from origin\)$")
+# main.c:bd_progress. Status on stderr, deliberately not a warning.
+PROGRESS_RE = re.compile(rb"^gpbpf: progress (\d+)/(\d+) ")
 
 # The viewer's PNG is grayscale+alpha: bedrock is this shade, everything else is
 # transparent so the page's own background shows through and owns the theme.
@@ -76,13 +79,26 @@ def job_of(d):
     return j
 
 
-def job_start(jid):
+def job_start(jid, scans=1):
     if not jid:
         return None
-    rec = {"procs": set(), "cancelled": False}
+    # done/total are columns within the current scan; scan/scans tracks which
+    # orientation of a multi-orientation search is running, so the page can show
+    # one bar across the whole request rather than four that each restart at 0
+    rec = {"procs": set(), "cancelled": False,
+           "done": 0, "total": 0, "scan": 0, "scans": scans}
     with JOBS_LOCK:
         JOBS[jid] = rec
     return rec
+
+
+def job_progress(jid):
+    """-> the live counters, or None once the request has finished."""
+    with JOBS_LOCK:
+        rec = JOBS.get(jid)
+        if rec is None:
+            return None
+        return {k: rec[k] for k in ("done", "total", "scan", "scans")}
 
 
 def job_end(jid):
@@ -183,15 +199,21 @@ def parse_search(d, cfg):
 
 
 def deadline_from(d, cfg):
-    """Absolute time this request has to be finished by.
+    """Absolute time this request has to be finished by, or None for no limit.
 
     One deadline per request, not per process: a four-orientation search shares
     the budget rather than being granted it four times over, so the number in
     the GUI is the wall time the whole thing can take.
+
+    0 means no deadline. A full-border scan runs for days, and there is no
+    timeout worth guessing for it -- Cancel is what stops those, and it arrives
+    on a second connection and kills the process, so an unbounded run is still
+    interruptible. It is opt-in per request precisely because it removes the
+    only automatic way a wedged search ever lets go of its handler thread.
     """
     t = d.get("timeout")
-    secs = int(cfg.timeout) if t is None else as_int(t, 1, MAX_TIMEOUT, "timeout")
-    return time.monotonic() + secs
+    secs = int(cfg.timeout) if t is None else as_int(t, 0, MAX_TIMEOUT, "timeout")
+    return None if secs == 0 else time.monotonic() + secs
 
 
 def spawn(argv, deadline, rec=None):
@@ -207,16 +229,40 @@ def spawn(argv, deadline, rec=None):
         if missed:
             p.kill()
     # a deadline already past still gets a moment, so the failure is a timeout
-    # rather than a race against process startup
-    killer = threading.Timer(max(0.1, deadline - time.monotonic()), p.kill)
+    # rather than a race against process startup. deadline None is the no-limit
+    # mode: build the timer anyway but never start it, so all four call sites can
+    # go on calling killer.cancel() blindly.
+    killer = threading.Timer(0 if deadline is None
+                             else max(0.1, deadline - time.monotonic()), p.kill)
     killer.daemon = True
-    killer.start()
+    if deadline is not None:
+        killer.start()
     # stderr must be drained concurrently or a full pipe deadlocks the stdout
-    # read. It only ever carries a few gpbpf: warnings, but the deadlock is real.
+    # read. The deadlock is real, and stderr now also carries progress, so this
+    # reads line by line: one blocking read to EOF would only deliver progress
+    # once the search it describes had already finished.
     err = []
-    t = threading.Thread(target=lambda: err.append(p.stderr.read()), daemon=True)
+    t = threading.Thread(target=lambda: drain_stderr(p.stderr, err, rec),
+                         daemon=True)
     t.start()
     return p, killer, err, t
+
+
+def drain_stderr(stream, err, rec):
+    """Split gpbpf's progress lines out of its warnings.
+
+    `gpbpf: progress <done>/<total> <pct>%` is status, not a problem, and the
+    GUI shows warnings to the user -- left in `err` a long scan would bury a
+    real warning under thousands of status lines.
+    """
+    for line in stream:
+        m = PROGRESS_RE.match(line)
+        if not m:
+            err.append(line)
+            continue
+        if rec is not None:
+            with JOBS_LOCK:
+                rec["done"], rec["total"] = int(m[1]), int(m[2])
 
 
 def run_search(argv, limit, deadline, rec=None):
@@ -254,13 +300,13 @@ def run_search(argv, limit, deadline, rec=None):
         p.stderr.close()
     errt.join(timeout=5)
 
-    stderr = (err[0] if err else b"").decode("utf-8", "replace")
+    stderr = b"".join(err).decode("utf-8", "replace")
     warnings = [l for l in stderr.splitlines() if l.strip()]
     if rc != 0 or not last.endswith(SENTINEL):
         # the watchdog is the only thing that kills the process, so a run that
         # died past its deadline died of the timeout. Say that, rather than
         # leaving the page to report SIGKILL as "gpbpf exited -9".
-        if time.monotonic() >= deadline:
+        if deadline is not None and time.monotonic() >= deadline:
             raise RuntimeError("timed out: raise Timeout, or search a smaller area")
         raise RuntimeError("gpbpf exited %d%s" % (rc, ": " + stderr if stderr else ""))
     return matches, nl - 1, time.monotonic() - t0, warnings
@@ -419,7 +465,8 @@ def make_handler(cfg):
                 self._json(404, {"error": "not found"})
 
         def do_POST(self):
-            if self.path not in ("/api/search", "/api/estimate", "/api/cancel"):
+            if self.path not in ("/api/search", "/api/estimate", "/api/cancel",
+                                 "/api/progress"):
                 return self._json(404, {"error": "not found"})
             # Requiring JSON forces a CORS preflight we never answer, so a page
             # on another origin cannot drive this server. Impact would be low
@@ -435,6 +482,8 @@ def make_handler(cfg):
                 return self._guard(lambda: self._estimate(raw))
             if self.path == "/api/cancel":
                 return self._guard(lambda: self._cancel(raw))
+            if self.path == "/api/progress":
+                return self._guard(lambda: self._progress(raw))
             self._guard(lambda: self._search(raw))
 
         def _cancel(self, raw):
@@ -442,6 +491,16 @@ def make_handler(cfg):
             if not jid:
                 raise BadRequest("job: required")
             self._json(200, {"cancelled": job_cancel(jid)})
+
+        def _progress(self, raw):
+            """Polled on a second connection, for the same reason cancel is: the
+            search itself is one blocking request and cannot report on itself."""
+            jid = job_of(self._body(raw))
+            if not jid:
+                raise BadRequest("job: required")
+            # unknown job -> finished (or never started); not an error, the
+            # search's own response is what tells the page either way
+            self._json(200, job_progress(jid) or {})
 
         def _estimate(self, raw):
             """Expected match count, measured rather than modelled."""
@@ -478,10 +537,13 @@ def make_handler(cfg):
             argvs, area = parse_search(d, cfg)
             deadline = deadline_from(d, cfg)
             jid = job_of(d)
-            rec = job_start(jid)
+            rec = job_start(jid, len(argvs))
             matches, count, elapsed, warnings = [], 0, 0.0, []
             try:
                 for i, argv in enumerate(argvs):
+                    if rec is not None:
+                        with JOBS_LOCK:
+                            rec["scan"], rec["done"], rec["total"] = i, 0, 0
                     ms, c, el, warn = run_search(argv, limit, deadline, rec)
                     # tagged with which pattern hit, so the page can draw the
                     # match in the orientation that actually matched
@@ -679,8 +741,19 @@ def selftest(cfg):
     got, code = post(huge)
     check("past its budget it times out, and says so (%s)" % got.get("error"),
           code == 500 and "timed out" in got.get("error", ""))
-    _, code = post(dict(huge, timeout=0))
+    _, code = post(dict(huge, timeout=-1))
     check("out-of-range timeout rejected", code == 400)
+
+    # timeout 0 is the no-limit mode. Asserted on the watchdog rather than by
+    # running something long: the point is that no killer is armed, and a test
+    # that waited for one not to fire could only ever be inconclusive.
+    check("timeout 0 means no deadline", deadline_from({"timeout": 0}, cfg) is None)
+    p, killer, _e, _t = spawn(trivial, None)
+    check("a no-deadline spawn arms no watchdog", not killer.is_alive())
+    killer.cancel()
+    p.stdout.close()
+    p.stderr.close()
+    p.wait()
 
     # 8. cancelling. A single permissive block over the whole area emits a few
     #    hundred million lines, so it runs long enough to be interrupted; the
@@ -713,6 +786,35 @@ def selftest(cfg):
           post_to("/api/cancel", {"job": "no-such-job"}) == ({"cancelled": False}, 200))
     _, code = post_to("/api/cancel", {"job": "bad id!"})
     check("malformed job name rejected", code == 400)
+
+    # 7b. progress. Split from warnings at the drain, checked directly rather
+    #     than by racing a long search -- the classification is the contract.
+    fake = io.BytesIO(b"gpbpf: progress 10/100 10.000%\n"
+                      b"gpbpf: CUDA unavailable, falling back to CPU\n"
+                      b"gpbpf: progress 50/100 50.000%\n")
+    err, prec = [], {"done": 0, "total": 0, "scan": 0, "scans": 1}
+    drain_stderr(fake, err, prec)
+    check("progress is not reported as a warning",
+          err == [b"gpbpf: CUDA unavailable, falling back to CPU\n"]
+          and (prec["done"], prec["total"]) == (50, 100))
+
+    # and live, over the second connection, while a search is actually running.
+    # gpbpf stays silent for its first two seconds, so this has to outwait that.
+    jid = "selftest-progress"
+    out = {}
+    runner = threading.Thread(target=lambda: out.update(zip(("d", "code"),
+                                                           post(dict(forever, job=jid)))))
+    runner.start()
+    time.sleep(4.0)
+    got, code = post_to("/api/progress", {"job": jid})
+    post_to("/api/cancel", {"job": jid})
+    runner.join(20)
+    check("progress reports live columns (%s of %s)"
+          % (got.get("done"), got.get("total")),
+          code == 200 and got.get("total", 0) > 0 and got.get("done", 0) > 0
+          and got["done"] <= got["total"])
+    check("progress for an unknown job is empty, not an error",
+          post_to("/api/progress", {"job": "no-such-job"}) == ({}, 200))
 
     # 8. the measured estimate. The point of it is the multi-layer case, where
     #    multiplying per-layer probabilities is 3.6x low, so check the sampled

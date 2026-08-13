@@ -3,7 +3,8 @@
   "recorded": "2026-08-12",
   "how": "Captured from a build that passed the 22-case cross-check against the Java implementation these vectors originally came from, at reference commit 726af429711759e41a32111b33e6c1327f025838. That harness has since been removed: the generator is pinned by these vectors now, and the project no longer depends on the original to build or test.",
   "added-2026-08-13": "The two 'float compare boundary' cases were added later and never saw that cross-check, so their expected values were established from the semantics instead of from our own output. p=0.8 and p=0.6 are exact multiples of 2^-24 (13421773 and 10066330), so nextFloat() can land exactly on them; p=0.4 and p=0.2 cannot. Java evaluates (double)nextFloat() < p and we evaluate f < p -- both comparisons are strict, so a draw landing exactly on p is a non-match either way, independent of the narrowing. Columns (269,4168) at y=-63 and (1533,851) at y=-62 are such draws for seed 12345 and must stay absent. Verified load-bearing by mutation: changing bd_probe's `<` to `<=` passes every other case here and fp_proof, and fails these two.",
-  "warning": "A diff against these is a bug in this repo. Do not re-record to make a red gate green -- see the header of tools/check.py."
+  "warning": "A diff against these is a bug in this repo. Do not re-record to make a red gate green -- see the header of tools/check.py.",
+  "added-2026-08-13-selectivity": "The 'selectivity sort permutes' case was recorded from the build immediately BEFORE main.c began sorting the pattern by selectivity, so it pins the pre-sort match set. The sort is a pure reordering -- bd_probe seeds only from (x+dx, y, z+dz) and carries no state between blocks, so bd_check is a conjunction of independent predicates -- and this vector is what holds that claim to it. It is not an independent check of the generator itself; the 23 cases above are."
  },
  "cases": {
   "single probabilistic block": {
@@ -311,6 +312,22 @@
    ],
    "matches": 88,
    "sha256": "8fda199e2fd7456a343674e4943f513d25bddb4b1fa4bc87bf214e44ea8fd63d"
+  },
+  "selectivity sort permutes": {
+   "mode": "sorted",
+   "args": [
+    "12345",
+    "0",
+    "0",
+    "300",
+    "300",
+    "0,-60,0:0",
+    "1,-63,0:1",
+    "0,-63,0:0",
+    "1,-60,0:1"
+   ],
+   "matches": 2265,
+   "sha256": "b05412d967042d47a0343695edfd464d0c3e1f69338b2c71b7f20dce90049c0b"
   }
  }
 }

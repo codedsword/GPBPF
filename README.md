@@ -44,10 +44,15 @@ Requires `openssl-devel` (MD5, used once at startup for seed derivation).
 Not frozen — see [CONTRIBUTING.md](CONTRIBUTING.md) — but stable today:
 
 ```sh
-gpbpf <worldSeed> <fromX> <fromZ> <toX> <toZ> [<block>...]
+gpbpf <worldSeed> <fromX> <fromZ> <toX> <toZ> [<block>...] [--resume <columns>]
 ```
 
 - `fromX`/`fromZ` inclusive, `toX`/`toZ` exclusive.
+- `--resume <columns>` skips that many columns of the range, taking the number
+  straight off a stopped run's own output — see
+  [Stopping and resuming](#stopping-and-resuming). It may appear anywhere in the
+  argument list (`--resume=N` also works); a block argument can never be
+  mistaken for it, since every block contains a comma and a colon.
 - Each `<block>` is `X,Y,Z:B` — `X`/`Z` are pattern-relative offsets, `Y` is an
   **absolute** world height, `B` is `1` for bedrock and `0` for not-bedrock.
 - With no `<block>` arguments, the pattern is loaded from `./pattern/*.txt`:
@@ -126,6 +131,34 @@ restart. `--timeout` sets what that field starts at (300s). The budget covers
 the whole request, so scanning four orientations shares it instead of taking
 four times as long, and a run that exceeds it says *timed out* rather than
 reporting the SIGKILL as `gpbpf exited -9`.
+
+**Timeout 0 runs with no limit**, and the unit next to the field swaps to
+*no limit* so a `0 s` timeout cannot be read as a bug. Past a certain size there
+is no timeout worth guessing — a full-border scan is measured in days — and the
+honest options are an unbounded run or a number invented to look reassuring. It
+is opt-in per request because it removes the only automatic way a wedged search
+lets go of its handler thread; **Cancel search** is then the only thing that
+stops it, which it can, since it kills the process over a second connection.
+
+While a search runs, the box shows elapsed time, a bar, and a time remaining,
+from two sources in order of preference:
+
+**Measured**, once the binary starts reporting. The page polls `/api/progress`
+on a second connection — the same reason **Cancel** needs one, since the search
+itself is a single blocking request that cannot report on itself. The server
+picks the counters out of gpbpf's stderr as they arrive, so they are real
+columns searched, not an estimate. Multi-orientation searches fill **one** bar
+across the whole request rather than four that each restart at zero.
+
+**Extrapolated**, before that. gpbpf stays silent for its first two seconds, and
+a search shorter than that never reports at all, so the bar starts as an
+extrapolation from the throughput of your *last* search, kept in `localStorage`.
+That self-calibrates to the machine and to whether CUDA is in play, which no
+constant in the page could. The first ever search shows elapsed only rather than
+inventing a bar, and a run that outlasts its estimate holds at 99% and says
+*past the … estimate* rather than sitting at 100% while still working. Runs
+under a second are mostly process startup, so they do not update the
+calibration.
 
 ```sh
 make webtest  # server results must equal the CLI's, byte for byte
@@ -307,6 +340,146 @@ probe is `p=0.2`, so 80% of columns are rejected after one RNG call, while the
 alive into a second probe. The plate row is also a check on the search itself —
 205,143 against 400e9 × 0.2⁹ = 204,800 predicted, 0.17% off.
 
+**Both rows predate the selectivity sort below.** The plate row is unaffected —
+all nine of its blocks pass at 0.2, so there is nothing to reorder. The
+20-block row is exactly the gap the sort closes, and no longer starts on a
+`p=0.8` probe.
+
+### Tiling
+
+The CUDA path walks the range in tiles rather than issuing one launch for the
+whole thing. A single launch hits three walls at scale:
+
+- the display driver kills a kernel that runs for minutes;
+- the match buffer is fixed and per launch, so a dense pattern overflows it and
+  the search used to end there — *"results truncated, search a smaller range"*;
+- the match counter is a 32-bit atomic.
+
+That last one sets the tile ceiling and is not a tuning knob: a tile can match
+on every column, so a tile wider than `UINT_MAX` could wrap the counter and make
+an overflowing launch look like a small one — silent truncation, the exact
+failure the buffer check exists to prevent. The ceiling is 2³¹ columns, ~0.16 s
+at 13 G col/s.
+
+A tile is a contiguous window of the *flattened* index, which is already
+x-major/z-minor, so tiles need no 2D geometry. The size adapts rather than being
+tuned, because match density cannot be known before the search: a tile that
+overflows the buffer is halved and retried, one that comes back nearly empty
+doubles.
+
+What that buys, on a deliberately dense pattern (`0,-60,0:0`, ~80% of columns
+match) over 30M columns:
+
+| | matches |
+|-|---------|
+| one launch | 16,777,216 — the buffer, truncated |
+| tiled | **24,001,022** — equals the CPU path exactly |
+
+It costs nothing on searches that were already fine: the 400e9-column plate
+above runs 13.76 s tiled against 13.72 s in a single launch.
+
+A full-border scan is ~1.7M launches, about 17 s of launch overhead spread
+across ~31 hours. **The remaining ceiling is host RAM for matches, not the GPU**
+— see [Known limits](#known-limits).
+
+### Progress
+
+Searches that run longer than two seconds report to **stderr**, at most one line
+a second:
+
+```
+gpbpf: progress 40533753856/400000000000 10.133%
+```
+
+stderr because stdout is the match stream — `web/serve.py` parses it, and a
+status line in the middle would read as a match. Silent below two seconds, so
+ordinary searches and the parity harness see no new output at all, and a
+multi-day scan spends ~100 KB on it.
+
+Counted in columns rather than as a bare percentage because that is exactly what
+`--resume` takes.
+
+### Stopping and resuming
+
+Matches are collected in memory and printed at the end, so a scan killed at hour
+30 used to lose all 30 hours of them — and a resume offset alone would then let
+you continue past ground whose results were gone. So **Ctrl-C stops gracefully**:
+the search finishes the tile (GPU) or column (CPU) it is on, prints what it
+found, and says where to pick up.
+
+```
+^C
+gpbpf: stopped at column 115695681536 of 400000000000 (28.924%); results above are complete up to there
+gpbpf: resume with: --resume 115695681536
+```
+
+```sh
+gpbpf 12345 -400000 -250000 400000 250000 <blocks> > part1.txt   # ^C
+gpbpf 12345 -400000 -250000 400000 250000 <blocks> --resume 115695681536 > part2.txt
+cat part1.txt part2.txt          # byte-identical to the uninterrupted run
+```
+
+That last line is the contract, and it holds on both paths — verified at 400e9
+columns (59,143 + 146,000 = 205,143 matches, identical including order) and in
+`make test`, which stops a search mid-flight and rejoins the halves.
+
+A stopped run **exits 2**, so `gpbpf … && next-step` will not treat a partial
+scan as a whole one. Everything it printed is complete and correctly ordered for
+the ground actually covered.
+
+Two details worth knowing:
+
+- **Anything past the resume point is discarded before printing.** On the CPU
+  path `schedule(dynamic)` lets a fast thread finish columns well above the
+  frontier; keeping them would double-count when the halves are joined
+  (measured: 1,370 duplicates on a 2.6M-match stop). Discarding costs work
+  already done, which is the cheaper mistake.
+- **The resume point is conservative on the CPU path.** Dynamic chunks are
+  handed out in increasing x, so every x below the lowest one still in flight is
+  complete — that is the frontier, and resuming above it would skip ground
+  nobody searched. On the CUDA path tiles are strictly sequential, so it is
+  exact.
+
+The GUI's **Cancel** is unaffected: it sends SIGKILL, which cannot be caught, and
+it wants the results discarded anyway.
+
+### Ordering the pattern
+
+`bd_check` exits on the first mismatch, so the order of the pattern decides how
+many probes an average column costs. A block's *pass* probability is `p` where
+the pattern wants bedrock and `1 − p` where it wants air, and the expected probe
+count is dominated by whatever sits first: a pattern led by `p=0.2` costs
+1 + 0.2 + 0.04 + … ≈ 1.25 probes per column, one led by 0.8 costs ≈ 5.
+
+A painted pattern arrives in close to the worst order for this, and not by
+accident — most cells of a screenshot are *air*, and an air cell on the dense
+`y=−63` layer passes 80% of the time. So `main.c` sorts the pattern ascending by
+pass probability before searching. Reordering cannot change the result:
+`bd_probe` seeds only from `(x+dx, y, z+dz)` and carries no state between blocks,
+so `bd_check` is a conjunction of independent predicates. The
+`selectivity sort permutes` vector pins that — it was recorded from the build
+immediately before the sort landed, and mixes both Y levels and wants so the
+sort really does permute it.
+
+Measured both ways, against a build taken from the commit immediately before the
+sort. Output byte-identical in both pairs.
+
+| workload | as painted | sorted |
+|----------|-----------|--------|
+| 4×4 patch on `y=−60` (13 air, 3 bedrock), 3.6e9 columns, 12-thread CPU | 11.46 s | **3.78 s** (3.0×) |
+| 20 blocks across `y=−63…−60`, 400e9 columns, CUDA | 45.32 s (8.8 G col/s) | **31.15 s** (12.8 G col/s, 1.5×) |
+
+**The GPU gains less than the CPU, and that is the interesting part.** A warp
+runs 32 columns in lockstep, so it costs the maximum over its threads, not the
+average — early exit only pays when every column in the warp exits together.
+The CPU takes the full benefit per column; the GPU takes it per warp. Both are
+worth having, neither is free, and quoting the CPU's 3× as the headline would
+misrepresent the GPU path this project is named for.
+
+The win is bounded by how badly ordered the input was: a pattern already written
+selective-first gains nothing, which is why the 3×3 plate rows above are
+unchanged.
+
 ```sh
 # args spelled out: zsh does not word-split unquoted parameters, so a variable
 # would arrive as one argument
@@ -376,12 +549,16 @@ with the formatting made that trade unnecessary.
 
 ## Known limits
 
-- The CUDA path caps the pattern at 2048 blocks (64 KB constant memory) and the
-  match buffer at 2²⁴ entries. Both are detected and reported, never silently
-  truncated.
+- The CUDA path caps the pattern at 2048 blocks (64 KB constant memory).
+  Detected and reported, never silently truncated. The 2²⁴-entry match buffer
+  is no longer a limit on the search — it is per launch, and an overflowing
+  tile is halved and retried (see [Tiling](#tiling)).
 - Match output is buffered in memory before printing, so a search emitting
-  hundreds of millions of matches needs proportional RAM. Degenerate patterns
-  are the ones that do this; the CUDA path caps and reports instead.
+  hundreds of millions of matches needs proportional RAM. **This is now the
+  binding limit on a very large scan**, not the GPU: at roughly 8 bytes a match,
+  a billion matches is 8 GB. Selectivity is the fix — a pattern carrying enough
+  information to be unique over the area you are scanning (~52 bits over a full
+  2b2t border) produces a handful of matches, not billions.
 - The "blocks from origin" field may differ in the last ulp between libm
   implementations. Cosmetic — it is a display value, and only one vector
   compares it. Saturation is handled explicitly: C's narrowing of a double

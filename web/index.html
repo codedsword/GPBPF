@@ -276,6 +276,11 @@ details pre { background: var(--sunk); padding: .55rem; overflow: auto; border: 
 .modalbox .why { color: var(--dim); font-size: .92rem; margin-top: .5rem; }
 .modalbox .why b { color: var(--text); font-family: ui-monospace, monospace; }
 .modalbox button { margin-top: 1.1rem; padding: .5rem 1.6rem; }
+.bar {
+	height: .6rem; margin: 1rem 0 .1rem; background: var(--sunk);
+	border: 2px solid; border-color: var(--lo) var(--hi) var(--hi) var(--lo);
+}
+.bar i { display: block; height: 100%; width: 0; background: var(--accent); }
 /* blocks, because this is a Minecraft tool */
 .spin { display: flex; gap: .35rem; justify-content: center; margin: 1.1rem 0 .2rem; }
 .spin i { width: .8rem; height: .8rem; background: var(--rock); animation: blk .9s infinite ease-in-out; }
@@ -300,6 +305,7 @@ details pre { background: var(--sunk); padding: .55rem; overflow: auto; border: 
 	<div class="modalbox" role="status" aria-live="polite">
 		<h3 id="mtitle">Searching…</h3>
 		<div class="spin" id="mspin"><i></i><i></i><i></i><i></i></div>
+		<div class="bar hide" id="mbar"><i></i></div>
 		<div class="why" id="mbody"></div>
 		<button id="mcancel">Cancel search</button>
 		<button id="mclose" class="hide">Close</button>
@@ -381,9 +387,9 @@ details pre { background: var(--sunk); padding: .55rem; overflow: auto; border: 
 		</div>
 		<div class="field">
 			<label for="tmo">Timeout</label>
-			<input type="number" id="tmo" value="300" min="1" max="86400"
-			       title="give up on the whole search after this many seconds">
-			<span class="sep">s</span>
+			<input type="number" id="tmo" value="300" min="0" max="86400"
+			       title="give up on the whole search after this many seconds. 0 runs with no limit, for scans measured in hours — Cancel is then the only thing that stops it">
+			<span class="sep" id="tmosep">s</span>
 		</div>
 
 		<div class="est" id="est"></div>
@@ -480,6 +486,7 @@ const S = {
 	active: 0,
 	w: 5, h: 5,
 	rot: 1,          /* orientations to scan: 1, 2 (0°+180°) or 4 */
+	rate: 0,         /* columns/s from the last real search; 0 until there is one */
 	view: { y: -60, x0: -32, z0: -32, scale: 6 },
 	sample: null, sampleErr: false,
 	res: null, sel: -1,
@@ -870,6 +877,7 @@ function reqBody(limit) {
 /* The search is one blocking request that can run for tens of seconds over a
  * large area, so say so rather than leaving a page that looks hung. */
 function modal(title, body, done) {
+	stopProgress();
 	$("modal").classList.remove("hide");
 	$("mtitle").textContent = title;
 	$("mbody").innerHTML = body;
@@ -877,6 +885,71 @@ function modal(title, body, done) {
 	$("mclose").classList.toggle("hide", !done);
 	$("mcancel").classList.toggle("hide", done);
 	$(done ? "mclose" : "mcancel").focus();
+}
+
+const dur = (s) => s < 60 ? s.toFixed(0) + "s"
+	: s < 3600 ? Math.floor(s / 60) + "m " + Math.round(s % 60) + "s"
+	: Math.floor(s / 3600) + "h " + Math.round(s % 3600 / 60) + "m";
+
+/* The binary reports nothing until it is done -- it prints matches, then the
+ * sentinel -- so there is no true progress to show. What there is: elapsed,
+ * always honest, and a bar extrapolated from how fast the *last* search ran.
+ * That self-calibrates to the machine and to whether CUDA is in play, which no
+ * constant here could. First ever search has no rate, so it gets elapsed only
+ * rather than a made-up bar. */
+let tick = null, poll = null, real = null;
+function startProgress(est) {
+	const t0 = Date.now(), total = est.area * est.np;
+	const eta = S.rate ? total / S.rate : 0;
+	const head = "<b>" + human(est.area) + "</b> columns · ≈ <b>"
+		+ human(est.n) + "</b> matches expected";
+	const fill = $("mbar").firstElementChild;
+
+	real = null;
+	$("mbar").classList.toggle("hide", !eta);
+	fill.style.width = "0%";
+
+	/* The binary counts columns as it tiles, so ask the server what it has heard
+	 * — on a second connection, since the search itself is one blocking request.
+	 * Only tiled runs report at all, and only after two seconds, so `real` stays
+	 * null on short searches and the extrapolation below carries them. */
+	if (job) poll = setInterval(() => {
+		fetch("/api/progress", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ job }),
+		}).then((r) => r.json()).then((d) => {
+			if (d && d.total > 0) real = d;
+		}).catch(() => { /* the search's own response is what closes the modal */ });
+	}, 1000);
+
+	tick = setInterval(() => {
+		const el = (Date.now() - t0) / 1000;
+		let line = "elapsed <b>" + dur(el) + "</b>";
+		if (real) {
+			/* measured: whole-request fraction, so four orientations fill one bar
+			 * instead of four that each restart at zero */
+			const f = (real.scan + real.done / real.total) / real.scans;
+			fill.style.width = (Math.min(1, f) * 100).toFixed(1) + "%";
+			$("mbar").classList.remove("hide");
+			line += " · <b>" + (f * 100).toFixed(1) + "%</b>"
+				+ (real.scans > 1 ? " (scan " + (real.scan + 1) + "/" + real.scans + ")" : "")
+				+ (f > 0.005 ? " · ≈ <b>" + dur(el / f - el) + "</b> left" : "");
+		} else if (eta) {
+			/* hold at 99%: an estimate that reads 100% while the thing is still
+			 * running is worse than one that admits it is only an estimate */
+			fill.style.width = (Math.min(0.99, el / eta) * 100).toFixed(1) + "%";
+			line += el < eta ? " · ≈ <b>" + dur(eta - el) + "</b> left"
+				: " · past the <b>" + dur(eta) + "</b> estimate";
+		}
+		$("mbody").innerHTML = head + "<br>" + line;
+	}, 250);
+}
+function stopProgress() {
+	clearInterval(tick);
+	clearInterval(poll);
+	tick = poll = real = null;
+	$("mbar").classList.add("hide");
 }
 const modalDone = () => !$("mclose").classList.contains("hide");
 function modalClose() { $("modal").classList.add("hide"); }
@@ -911,6 +984,7 @@ async function search() {
 	$("mcancel").disabled = false;
 	modal("Searching…", "<b>" + human(est.area) + "</b> columns · ≈ <b>"
 		+ human(est.n) + "</b> matches expected", false);
+	startProgress(est);
 	try {
 		const r = await fetch("/api/search", {
 			method: "POST",
@@ -925,6 +999,13 @@ async function search() {
 			btn.textContent = "Search";
 			renderEstimate();
 			return;
+		}
+		/* recalibrate the ETA from what this run actually managed. Runs under a
+		 * second are mostly process startup, so they would teach the bar a
+		 * throughput this machine does not have. */
+		if (d.elapsed > 1) {
+			S.rate = (est.area * est.np) / d.elapsed;
+			save();
 		}
 		S.res = d;
 		/* which turn each pattern index was, frozen with the result: the grid
@@ -1145,6 +1226,7 @@ function save() {
 		localStorage.setItem("gpbpf2", JSON.stringify({
 			seed: S.seedText, w: S.w, h: S.h, layers: S.layers, active: S.active,
 			rot: S.rot, tmo: $("tmo").value, b: bounds(), view: S.view,
+			rate: S.rate,
 		}));
 	} catch (e) { /* private mode, quota -- losing autosave is not worth a dialog */ }
 }
@@ -1159,6 +1241,7 @@ function load() {
 	/* this was a boolean before 0°+180° became an option of its own */
 	S.rot = d.rot === true ? 4 : d.rot === 2 || d.rot === 4 ? d.rot : 1;
 	if (d.view) S.view = d.view;
+	if (d.rate > 0) S.rate = d.rate;
 	$("seed").value = d.seed;
 	$("rot").value = S.rot;
 	if (d.tmo) $("tmo").value = d.tmo;
@@ -1204,8 +1287,12 @@ $("addcustom").onclick = () => {
 };
 $("rot").onchange = () => { S.rot = +$("rot").value; renderAll(); };
 /* the binary has no timeout of its own, so this changes neither the estimate
- * nor the command line -- only how long the server waits */
-$("tmo").oninput = save;
+ * nor the command line -- only how long the server waits. 0 means it waits
+ * forever, and the unit swaps to say so: a "0 s" timeout reads like a bug. */
+function tmoNote() {
+	$("tmosep").textContent = +$("tmo").value === 0 ? "no limit" : "s";
+}
+$("tmo").oninput = () => { tmoNote(); save(); };
 $("run").onclick = search;
 $("copycli").onclick = () => {
 	const a = argvs();
@@ -1231,6 +1318,7 @@ if (!load()) {
 		for (let x = 1; x <= 3; x++) S.layers[0].cells[z * MAXW + x] = WANT;
 }
 $("seed").dispatchEvent(new Event("input"));
+tmoNote();
 renderPicker();
 renderAll();
 drawScatter();

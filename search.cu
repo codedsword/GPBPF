@@ -11,24 +11,48 @@
  * reads the same entry in lockstep, so this broadcasts instead of gathering. */
 #define MAX_PATTERN 2048
 
-/* ponytail: fixed match buffer, the kernel cannot realloc. Overflow is
- * detected and reported rather than silently truncated; raise the cap or run
- * the range in tiles if a real search ever hits it. */
+/* Fixed match buffer, the kernel cannot realloc. This is a *per launch* limit,
+ * which is why the host walks the range in tiles: overflow is now recoverable
+ * by halving the tile rather than being the end of the search. */
 #define MAX_MATCHES (1u << 24)
+
+/* Columns per launch. One launch for the whole range hits three walls at scale:
+ * the display driver kills a kernel that runs for minutes, the match buffer is
+ * per launch, and `count` is a 32-bit atomic.
+ *
+ * TILE_MAX is set by that last one and is not a tuning knob: a tile can match
+ * on every column, so a tile wider than UINT_MAX could wrap the counter and
+ * make an overflowing launch look like a small one -- silent truncation, the
+ * exact failure the buffer check exists to prevent. 2^31 columns is ~0.16 s at
+ * 13 G col/s, comfortably inside any watchdog, and a full-border scan is then
+ * ~1.7M launches: ~17 s of launch overhead across ~31 hours.
+ *
+ * The tile adapts rather than being tuned, because match density cannot be
+ * known before the search: a tile that overflows the buffer is halved and
+ * retried, one that comes back nearly empty doubles. */
+#define TILE_START (1LL << 28)
+#define TILE_MAX   (1LL << 31)
+#define TILE_MIN   (1LL << 16)
 
 __constant__ bd_block c_pat[MAX_PATTERN];
 
 extern "C" void bd_add_match(int32_t x, int32_t z);
+extern "C" void bd_progress(long long done);
+extern "C" int bd_stopped(void);
+extern "C" void bd_set_resume(long long at);
 
 __global__ void search_kernel(bd_derivers d, int npat, int xf, int zf,
-                              long long width, long long height,
-                              bd_match *out, unsigned int *count, unsigned int cap)
+                              long long height, long long base, long long count,
+                              bd_match *out, unsigned int *nout, unsigned int cap)
 {
-	long long total = width * height;
 	long long stride = (long long)gridDim.x * blockDim.x;
 
-	for (long long i = blockIdx.x * (long long)blockDim.x + threadIdx.x;
-	     i < total; i += stride) {
+	for (long long j = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+	     j < count; j += stride) {
+		/* the flattened index is x-major/z-minor, so a tile is a contiguous
+		 * window of it and needs no 2D geometry */
+		long long i = base + j;
+
 		/* Unflatten in 64-bit and narrow once at the end. `xf + (int)(i /
 		 * height)` overflows int for any search wider than 2^31 columns:
 		 * the quotient does not fit, and adding the truncated value to xf
@@ -41,7 +65,7 @@ __global__ void search_kernel(bd_derivers d, int npat, int xf, int zf,
 		int z = (int)(zf + i % height);
 
 		if (bd_check(&d, c_pat, npat, x, z)) {
-			unsigned int k = atomicAdd(count, 1u);
+			unsigned int k = atomicAdd(nout, 1u);
 
 			if (k < cap) {
 				out[k].x = x;
@@ -58,11 +82,11 @@ static int fail(const char *what, cudaError_t e)
 }
 
 extern "C" int gpu_search(const bd_derivers *d, const bd_block *pat, int npat,
-                          int xf, int zf, int xt, int zt)
+                          int xf, int zf, int xt, int zt, long long from)
 {
 	long long width = (long long)xt - xf;
 	long long height = (long long)zt - zf;
-	long long total;
+	long long total, base, tile;
 	bd_match *d_out = NULL, *h_out = NULL;
 	unsigned int *d_count = NULL, h_count = 0, cap;
 	int devices = 0;
@@ -107,46 +131,70 @@ extern "C" int gpu_search(const bd_derivers *d, const bd_block *pat, int npat,
 		cudaFree(d_out);
 		return fail("alloc counter", e);
 	}
-	cudaMemset(d_count, 0, sizeof *d_count);
-
-	{
-		int threads = 256;
-		long long want = (total + threads - 1) / threads;
-		int grid = (int)(want < 65535 ? want : 65535);
-
-		search_kernel<<<grid, threads>>>(*d, npat, xf, zf, width, height,
-		                                 d_out, d_count, cap);
-	}
-
-	e = cudaDeviceSynchronize();
-	if (e != cudaSuccess) {
+	h_out = (bd_match *)malloc((size_t)cap * sizeof *h_out);
+	if (!h_out) {
 		cudaFree(d_out);
 		cudaFree(d_count);
-		return fail("kernel", e);
+		fprintf(stderr, "gpbpf: out of memory\n");
+		return -1;
 	}
 
-	cudaMemcpy(&h_count, d_count, sizeof h_count, cudaMemcpyDeviceToHost);
-	if (h_count > cap) {
-		fprintf(stderr, "gpbpf: %u matches exceeded the %u-entry buffer; "
-		        "results truncated. Search a smaller range.\n", h_count, cap);
-		h_count = cap;
-	}
+	/* `from` is a flattened-index offset and tiles are windows of exactly that
+	 * index, so resuming is just where the walk starts. Progress stays absolute
+	 * so a second resume can be taken off a resumed run's own output. */
+	for (base = from, tile = TILE_START; base < total; ) {
+		long long n = tile < total - base ? tile : total - base;
+		int threads = 256;
+		long long want = (n + threads - 1) / threads;
+		int grid = (int)(want < 65535 ? want : 65535);
 
-	if (h_count) {
-		h_out = (bd_match *)malloc((size_t)h_count * sizeof *h_out);
-		if (!h_out) {
+		cudaMemset(d_count, 0, sizeof *d_count);
+		search_kernel<<<grid, threads>>>(*d, npat, xf, zf, height, base, n,
+		                                 d_out, d_count, cap);
+
+		e = cudaDeviceSynchronize();
+		if (e != cudaSuccess) {
+			free(h_out);
 			cudaFree(d_out);
 			cudaFree(d_count);
-			fprintf(stderr, "gpbpf: out of memory\n");
-			return -1;
+			return fail("kernel", e);
 		}
-		cudaMemcpy(h_out, d_out, (size_t)h_count * sizeof *h_out,
-		           cudaMemcpyDeviceToHost);
-		for (unsigned int i = 0; i < h_count; i++)
-			bd_add_match(h_out[i].x, h_out[i].z);
-		free(h_out);
+
+		cudaMemcpy(&h_count, d_count, sizeof h_count, cudaMemcpyDeviceToHost);
+		if (h_count > cap) {
+			/* recoverable now: take the same ground in a smaller bite rather
+			 * than truncating. Only a tile already at the floor can still
+			 * overflow, and that needs >16.7M matches in 65536 columns, which
+			 * no pattern can produce. */
+			if (n > TILE_MIN) {
+				tile = n / 2;
+				continue;
+			}
+			fprintf(stderr, "gpbpf: %u matches in a %lld-column tile exceeded "
+			        "the %u-entry buffer; results truncated.\n", h_count, n, cap);
+			h_count = cap;
+		}
+
+		if (h_count) {
+			cudaMemcpy(h_out, d_out, (size_t)h_count * sizeof *h_out,
+			           cudaMemcpyDeviceToHost);
+			for (unsigned int i = 0; i < h_count; i++)
+				bd_add_match(h_out[i].x, h_out[i].z);
+		}
+
+		base += n;
+		bd_progress(base);
+		/* between tiles, so a stop lands on an exact prefix of the flattened
+		 * index -- which is precisely what --resume takes */
+		if (bd_stopped()) {
+			bd_set_resume(base);
+			break;
+		}
+		if (h_count < cap / 8 && tile < TILE_MAX)
+			tile *= 2;
 	}
 
+	free(h_out);
 	cudaFree(d_out);
 	cudaFree(d_count);
 	return 0;

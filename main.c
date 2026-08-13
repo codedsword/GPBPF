@@ -10,7 +10,9 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <signal.h>
 #include <string.h>
+#include <time.h>
 
 #include <openssl/evp.h>
 
@@ -63,6 +65,94 @@ static void add_block(int32_t dx, int32_t y, int32_t dz, int32_t want)
  * contradicts `want` makes the whole search provably empty, one that agrees is
  * redundant and is dropped. Leaves only probabilistic blocks, each carrying a
  * precomputed probability. Returns 0 if the search cannot match anything. */
+/* Progress, for searches long enough that silence is indistinguishable from a
+ * hang. Goes to stderr because stdout is the match stream -- web/serve.py
+ * parses that, and a status line in the middle of it would read as a match.
+ *
+ * Silent for the first two seconds and then at most one line a second, so
+ * ordinary searches and the parity harness see no new output at all, and a
+ * multi-day scan costs ~100 KB of it.
+ *
+ * Reported as columns rather than as a percentage alone so it doubles as a
+ * restart point: the CUDA path takes tiles in flattened order, so the columns
+ * counted here are a strict x-major prefix and the scan resumes at
+ * `fromX + done/height`. The CPU path hands x out with `schedule(dynamic)`, so
+ * there the count is accurate but not a prefix -- resume a little behind it. */
+static long long prog_total;
+static time_t prog_start, prog_last;
+
+/* Graceful stop, which is what makes --resume reachable. Matches are collected
+ * in memory and printed at the end, so a scan killed at hour 30 loses all 30
+ * hours of them -- the resume offset alone would let you continue past ground
+ * whose results you no longer have. On SIGINT/SIGTERM the search instead stops
+ * at the next tile (GPU) or column (CPU), prints what it found, and says where
+ * to pick up.
+ *
+ * The GUI's Cancel is unaffected: it sends SIGKILL, which cannot be caught, and
+ * it wants the results discarded anyway. */
+static volatile sig_atomic_t stop_flag;
+static long long resume_at = -1;   /* -1 = ran to completion */
+
+int bd_stopped(void) { return stop_flag; }
+void bd_set_resume(long long at) { resume_at = at; }
+static void on_stop(int sig) { (void)sig; stop_flag = 1; }
+
+static void progress_begin(long long total)
+{
+	prog_total = total;
+	prog_start = prog_last = time(NULL);
+}
+
+void bd_progress(long long done)
+{
+	time_t now = time(NULL);
+
+	if (now - prog_start < 2 || now == prog_last)
+		return;
+	prog_last = now;
+	fprintf(stderr, "gpbpf: progress %lld/%lld %.3f%%\n", done, prog_total,
+	        prog_total ? 100.0 * (double)done / (double)prog_total : 100.0);
+	fflush(stderr);
+}
+
+/* Drop everything at or past a flattened offset. See the call site. */
+static void trim_matches(int xf, int zf, int zt, long long upto)
+{
+	long long h = (long long)zt - zf;
+	size_t i, n = 0;
+
+	for (i = 0; i < nmatches; i++) {
+		long long f = ((long long)matches[i].x - xf) * h
+		            + ((long long)matches[i].z - zf);
+
+		if (f < upto)
+			matches[n++] = matches[i];
+	}
+	nmatches = n;
+}
+
+/* Odds a random column gets past this one probe. */
+static float pass_p(const bd_block *b)
+{
+	return b->want ? b->p : 1.0f - b->p;
+}
+
+/* bd_check exits on the first mismatch, so the pattern's order decides how many
+ * probes an average column costs: least-likely-first means most columns die on
+ * probe one. A painted pattern is mostly *air* cells, which pass at 0.8, so as
+ * drawn it tends to arrive in close to the worst order -- measured 11.0 G col/s
+ * against 28.6 for a selective first probe (README, "At 400 billion columns").
+ *
+ * Reordering cannot change the result: bd_probe seeds only from (x+dx, y, z+dz)
+ * and carries no state between blocks, so bd_check is a conjunction of
+ * independent predicates. The "selectivity sort permutes" vector pins that. */
+static int cmp_selectivity(const void *a, const void *b)
+{
+	float pa = pass_p((const bd_block *)a), pb = pass_p((const bd_block *)b);
+
+	return (pa > pb) - (pa < pb);
+}
+
 static int prefilter(void)
 {
 	int i, n = 0;
@@ -424,10 +514,20 @@ static void emit_matches(void)
  * at 1 thread against 0.66 s at 12. Threads accumulate locally and the lists are
  * concatenated afterwards -- sort_matches orders the result regardless, so the
  * concatenation order does not matter. */
-static void cpu_search(const bd_derivers *d, int xf, int zf, int xt, int zt)
+static void cpu_search(const bd_derivers *d, int xf, int zf, int xt, int zt,
+                       long long from)
 {
 	bd_match **tm;
 	size_t *tn;
+	int *sat;
+	long long height = (long long)zt - zf;
+	long long done = from;
+	/* `from` is a flattened-index offset, and the flattening is x-major, so it
+	 * generally lands part way down a column: the first x resumes at that z,
+	 * every later one at zf. Getting this wrong loses up to one column of
+	 * matches silently, which is exactly what a resume must not do. */
+	int xfirst = height > 0 ? (int)(xf + from / height) : xf;
+	int zfirst = height > 0 ? (int)(zf + from % height) : zf;
 	int t, nthreads = 1;
 
 #ifdef _OPENMP
@@ -437,7 +537,8 @@ static void cpu_search(const bd_derivers *d, int xf, int zf, int xt, int zt)
 		nthreads = 1;
 	tm = (bd_match **)calloc((size_t)nthreads, sizeof *tm);
 	tn = (size_t *)calloc((size_t)nthreads, sizeof *tn);
-	if (!tm || !tn)
+	sat = (int *)calloc((size_t)nthreads, sizeof *sat);
+	if (!tm || !tn || !sat)
 		die("out of memory");
 
 #ifdef _OPENMP
@@ -446,16 +547,26 @@ static void cpu_search(const bd_derivers *d, int xf, int zf, int xt, int zt)
 	{
 		bd_match *lm = NULL;
 		size_t ln = 0, lc = 0;
-		int id = 0, x;
+		int id = 0, x, mystop = INT_MAX;
 
 #ifdef _OPENMP
 		id = omp_get_thread_num();
 #pragma omp for schedule(dynamic, 8) nowait
 #endif
-		for (x = xf; x < xt; x++) {
-			int z;
+		for (x = xfirst; x < xt; x++) {
+			int z = x == xfirst ? zfirst : zf;
 
-			for (z = zf; z < zt; z++)
+			/* `continue`, not `break`: OpenMP forbids jumping out of a
+			 * worksharing loop, so the remaining iterations still run -- as a
+			 * flag read each, which is nothing. mystop keeps the *first* x this
+			 * thread skipped, and chunks are handed out in increasing order, so
+			 * that is the lowest it would have gone on to search. */
+			if (bd_stopped()) {
+				if (mystop == INT_MAX)
+					mystop = x;
+				continue;
+			}
+			for (; z < zt; z++)
 				if (bd_check(d, blocks, nblocks, x, z)) {
 					if (ln == lc) {
 						lc = lc ? lc * 2 : 1024;
@@ -465,12 +576,40 @@ static void cpu_search(const bd_derivers *d, int xf, int zf, int xt, int zt)
 					lm[ln].z = z;
 					ln++;
 				}
+			/* one lock per x-column -- each is a full pass over the z range, so
+			 * this is nothing next to the work it accounts for, and bd_progress
+			 * reads and writes statics that would otherwise race */
+#ifdef _OPENMP
+#pragma omp critical(progress)
+#endif
+			{
+				done += x == xfirst ? (long long)zt - zfirst : height;
+				bd_progress(done);
+			}
 		}
 		/* one write per thread, after the loop, so no false sharing on the
 		 * hot path; the parallel region's implicit barrier publishes them */
 		tm[id] = lm;
 		tn[id] = ln;
+		sat[id] = mystop;
 	}
+
+	if (bd_stopped()) {
+		/* `schedule(dynamic)` hands x out in increasing order and a thread
+		 * finishes its chunk before taking another, so every x below the lowest
+		 * one still in flight is complete. That is the only safe resume point:
+		 * the highest completed x is not, because a slower thread may still be
+		 * sitting on something below it. Conservative here re-searches a little;
+		 * optimistic would skip ground nobody ever looked at. */
+		int frontier = INT_MAX;
+
+		for (t = 0; t < nthreads; t++)
+			if (sat[t] < frontier)
+				frontier = sat[t];
+		if (frontier != INT_MAX)
+			bd_set_resume((long long)(frontier - xf) * height);
+	}
+	free(sat);
 
 	for (t = 0; t < nthreads; t++) {
 		if (tn[t]) {
@@ -492,20 +631,65 @@ static void cpu_search(const bd_derivers *d, int xf, int zf, int xt, int zt)
 #ifdef USE_CUDA
 /* search.cu; returns 0 on success, -1 if CUDA is unusable at runtime. */
 int gpu_search(const bd_derivers *d, const bd_block *pat, int npat,
-               int xf, int zf, int xt, int zt);
+               int xf, int zf, int xt, int zt, long long from);
 #endif
+
+/* Pull `--resume N` (or `--resume=N`) out of argv and compact it away, so the
+ * positional parsing below is untouched and a block argument still cannot be
+ * mistaken for an option -- every block contains a comma and a colon.
+ *
+ * The value is a column count, which is exactly what bd_progress prints, so a
+ * killed scan is restarted by copying the number off its last progress line.
+ * Returns the offset; dies on a malformed one rather than silently starting
+ * from zero, because a resume that quietly rescans is worse than no resume. */
+static long long take_resume(int *argc, char **argv)
+{
+	long long from = 0;
+	int i, n = *argc, seen = 0;
+
+	for (i = 1; i < n; ) {
+		char *a = argv[i], *v = NULL, *end;
+
+		if (strcmp(a, "--resume") == 0) {
+			if (i + 1 >= n)
+				die("--resume needs a column count");
+			v = argv[i + 1];
+		} else if (strncmp(a, "--resume=", 9) == 0) {
+			v = a + 9;
+		} else {
+			i++;
+			continue;
+		}
+
+		errno = 0;
+		from = strtoll(v, &end, 10);
+		if (end == v || *end || errno || from < 0)
+			die("--resume: expected a column count >= 0");
+		seen = 1;
+		memmove(&argv[i], &argv[i + (a[8] == '=' ? 1 : 2)],
+		        (size_t)(n - i - (a[8] == '=' ? 1 : 2)) * sizeof *argv);
+		n -= a[8] == '=' ? 1 : 2;
+	}
+	*argc = n;
+	argv[n] = NULL;
+	return seen ? from : 0;
+}
 
 int main(int argc, char **argv)
 {
 	bd_derivers d;
-	long long seed;
+	long long seed, total, from;
 	int xf, zf, xt, zt;
 	char *end;
 	size_t i;
 
+	from = take_resume(&argc, argv);
+
 	if (argc < 6) {
 		printf("usage:\n");
 		printf("   gpbpf <worldSeed> <fromX> <fromZ> <toX> <toZ> [<block>...]\n");
+		printf("   --resume <columns>   skip the first <columns> of the range,\n");
+		printf("                        as printed by the progress line\n");
 		return 0;
 	}
 
@@ -531,15 +715,47 @@ int main(int argc, char **argv)
 		printf("search finished\n"); /* a constant block contradicts the pattern */
 		return 0;
 	}
+	signal(SIGINT, on_stop);
+	signal(SIGTERM, on_stop);
+
+	qsort(blocks, nblocks, sizeof *blocks, cmp_selectivity);
+	total = xt > xf && zt > zf
+	      ? ((long long)xt - xf) * ((long long)zt - zf) : 0;
+	progress_begin(total);
+
+	if (from) {
+		if (from >= total) {
+			fprintf(stderr, "gpbpf: --resume %lld is at or past the end of this "
+			        "range (%lld columns); nothing left to search\n", from, total);
+			printf("search finished\n");
+			return 0;
+		}
+		fprintf(stderr, "gpbpf: resuming at column %lld of %lld (%.3f%%), x=%d\n",
+		        from, total, 100.0 * (double)from / (double)total,
+		        (int)(xf + from / ((long long)zt - zf)));
+	}
 
 #ifdef USE_CUDA
-	if (gpu_search(&d, blocks, nblocks, xf, zf, xt, zt) != 0) {
+	if (gpu_search(&d, blocks, nblocks, xf, zf, xt, zt, from) != 0) {
 		fprintf(stderr, "gpbpf: CUDA unavailable, falling back to CPU\n");
-		cpu_search(&d, xf, zf, xt, zt);
+		cpu_search(&d, xf, zf, xt, zt, from);
 	}
 #else
-	cpu_search(&d, xf, zf, xt, zt);
+	cpu_search(&d, xf, zf, xt, zt, from);
 #endif
+
+	/* A stopped run promises that what it printed is complete up to the
+	 * resume point, so anything past that point has to go. The CPU path is
+	 * where this bites: `schedule(dynamic)` lets a fast thread finish columns
+	 * well above the frontier, and those would be searched again on resume and
+	 * reported twice. Measured at 1,370 duplicates on a 2.6M-match stop.
+	 *
+	 * It throws away work already done. That is the right trade: the cost is
+	 * re-searching a few columns, and the alternative is output that silently
+	 * double-counts when the halves are joined. No-op on the CUDA path, whose
+	 * resume point is an exact prefix already. */
+	if (resume_at >= 0)
+		trim_matches(xf, zf, zt, resume_at);
 
 	/* Java emits matches in x-major, z-minor order; both parallel paths
 	 * produce them unordered, so sort before printing. */
@@ -547,5 +763,17 @@ int main(int argc, char **argv)
 	emit_matches();
 
 	printf("search finished\n");
+
+	/* Everything printed above is complete and correctly ordered for the ground
+	 * actually covered, which is why it is still worth printing. The non-zero
+	 * exit is what stops `gpbpf ... && next-step` treating a partial scan as a
+	 * whole one -- the stderr note alone would be missed by a script. */
+	if (resume_at >= 0) {
+		fprintf(stderr, "gpbpf: stopped at column %lld of %lld (%.3f%%); "
+		        "results above are complete up to there\n",
+		        resume_at, total, 100.0 * (double)resume_at / (double)total);
+		fprintf(stderr, "gpbpf: resume with: --resume %lld\n", resume_at);
+		return 2;
+	}
 	return 0;
 }

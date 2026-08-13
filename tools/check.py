@@ -24,7 +24,9 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
+import time
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -71,6 +73,12 @@ CASES = [
     # `<` to `<=` passed all 22 remaining vectors and fp_proof.
     ("float compare boundary p=0.8",    "sorted", ["12345", "265", "4160", "275", "4180", "0,-63,0:1"]),
     ("float compare boundary p=0.6",    "sorted", ["12345", "1530", "845", "1540", "860", "0,-62,0:1"]),
+    # main.c reorders the pattern least-likely-first so bd_check's early exit
+    # fires sooner. Every case above is single-y or single-want, so the sort is
+    # a no-op on all of them and none would notice if it changed the match set.
+    # This one mixes both and is written permissive-first, so the sort really
+    # does permute it: pass odds 0.8, 0.8, 0.2, 0.2 as spelled.
+    ("selectivity sort permutes",       "sorted", ["12345", "0", "0", "300", "300", "0,-60,0:0", "1,-63,0:1", "0,-63,0:0", "1,-60,0:1"]),
 ]
 
 
@@ -110,6 +118,107 @@ def pattern_dir_case(binary, tmp):
     b = normalize(run(binary, ["12345", "0", "0", "60", "60", "0,-60,0:1", "1,-60,0:0",
                                "0,-60,1:0", "1,-60,1:1"], tmp), "sorted")
     return a == b and len(a) > 0, len(a)
+
+
+def resume_case(binary, tmp):
+    """`--resume N` must equal the tail of a full run from column N.
+
+    Self-contained: it compares our own invocations against each other, so it
+    needs no recorded vector. The offsets are chosen to land *mid-column* --
+    flattening is x-major, so a resume point is generally part way down one x,
+    and restarting that x from zf instead of from the right z is the mistake
+    this is here to catch. It would re-report a sliver of already-searched
+    ground, or skip one, and both look like a working resume from the outside.
+    """
+    seed, xf, zf, xt, zt = "12345", 0, 0, 400, 300
+    pat = ["0,-60,0:1", "1,-60,0:1", "0,-60,1:1"]
+    args = [seed, str(xf), str(zf), str(xt), str(zt)] + pat
+    height = zt - zf
+    full = normalize(run(binary, args, tmp), "raw")
+
+    def flat(item):
+        x, z = (int(v) for v in item[1:].split(";"))
+        return (x - xf) * height + (z - zf)
+
+    total = (xt - xf) * height
+    bad = []
+    #                mid-column      column start   0        last column
+    for k in (12345, 7 * height + 51, 9 * height, 0, total - 7, total):
+        want = [m for m in full if flat(m) >= k]
+        got = normalize(run(binary, args + ["--resume", str(k)], tmp), "raw")
+        if got != want:
+            bad.append("k=%d: got %d, want %d" % (k, len(got), len(want)))
+    # and the two spellings agree
+    if normalize(run(binary, args + ["--resume=12345"], tmp), "raw") != \
+       normalize(run(binary, args + ["--resume", "12345"], tmp), "raw"):
+        bad.append("--resume=N differs from --resume N")
+    return not bad, (bad[0] if bad else "%d offsets" % 6)
+
+
+def stop_case(binary, tmp):
+    """SIGINT must stop cleanly, and the two halves must rebuild the whole.
+
+    The point is not that it stops -- it is that stopping loses nothing. Before
+    the signal handler existed, an interrupted scan printed *no* matches at all
+    (they are collected in memory and emitted at the end), so the resume offset
+    would have let you continue past ground whose results were gone.
+
+    Sized from a calibration run rather than fixed: the same range is ~35 s on
+    the CPU build and finishes before the signal on the CUDA one, and a test
+    that races the thing it measures is a test that flakes.
+    """
+    seed, zf, zt = "12345", 0, 20000
+    # selective on purpose: a permissive pattern makes this an output benchmark
+    # (50M matches printed three times) instead of a test of stopping
+    pat = ["%d,-60,%d:1" % (i % 3, i // 3) for i in range(8)]
+
+    def area(w):
+        return [seed, "0", str(zf), str(w), str(zt)] + pat
+
+    def timed(w):
+        t0 = time.time()
+        run(binary, area(w), tmp)
+        return time.time() - t0
+
+    # Two points, so the fit cancels the constant. One point cannot: the CUDA
+    # build spends ~0.2 s on context init before searching anything, which a
+    # single small run reads as the whole cost and underestimates throughput by
+    # three orders of magnitude -- sizing a "2 second" run that finishes in 0.2.
+    t1, t2 = timed(2000), timed(20000)
+    rate = (18000 * (zt - zf)) / max(t2 - t1, 1e-3)
+
+    out = err = None
+    for target in (1.2, 5.0):     # retry longer rather than flake if it beat us
+        width = max(400, min(4_000_000, int(target * rate / (zt - zf))))
+        args = area(width)
+        p = subprocess.Popen([binary] + args, cwd=tmp, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE)
+        time.sleep(min(0.6, target / 2.5))
+        p.send_signal(signal.SIGINT)
+        out, err = p.communicate(timeout=300)
+        err = err.decode("utf-8", "replace")
+        if p.returncode == 2:
+            break
+    if p.returncode != 2:
+        return False, "expected exit 2, got %d (%s)" % (p.returncode, err[-90:])
+    m = re.search(r"--resume (\d+)", err)
+    if not m:
+        return False, "no resume offset printed: %s" % err[-90:]
+    k = int(m[1])
+    if k <= 0:
+        return False, "stopped at column 0 -- nothing was searched, so this " \
+                      "would pass without proving anything"
+
+    part1 = normalize(out.decode("utf-8", "replace"), "raw")
+    part2 = normalize(run(binary, args + ["--resume", str(k)], tmp), "raw")
+    full = normalize(run(binary, args, tmp), "raw")
+    if part1 + part2 != full:
+        return False, "halves != whole (%d + %d vs %d)" % (len(part1), len(part2),
+                                                           len(full))
+    if not part1:
+        return False, "stopped before finding anything -- vacuous"
+    return True, "%d + %d == %d matches, stopped at %.1f%%" % (
+        len(part1), len(part2), len(full), 100.0 * k / (width * (zt - zf)))
 
 
 def main():
@@ -165,7 +274,17 @@ def main():
                                        "pattern/*.txt == explicit blocks", n))
     bad += 0 if ok else 1
 
-    total = len(CASES) + 1
+    ok, note = resume_case(cfg.binary, tmp)
+    print("  %s %-42s (%s)" % ("ok   " if ok else "FAIL ",
+                               "--resume N == tail of a full run", note))
+    bad += 0 if ok else 1
+
+    ok, note = stop_case(cfg.binary, tmp)
+    print("  %s %-42s (%s)" % ("ok   " if ok else "FAIL ",
+                               "SIGINT stops cleanly and loses nothing", note))
+    bad += 0 if ok else 1
+
+    total = len(CASES) + 3
     print()
     print("%d passed, %d failed" % (total - bad, bad))
     return 1 if bad else 0
