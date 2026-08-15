@@ -13,6 +13,7 @@
 #include <signal.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <openssl/evp.h>
 
@@ -80,6 +81,10 @@ static void add_block(int32_t dx, int32_t y, int32_t dz, int32_t want)
  * there the count is accurate but not a prefix -- resume a little behind it. */
 static long long prog_total;
 static time_t prog_start, prog_last;
+static int prog_bar;    /* stderr is a terminal: redraw one line in place */
+static int prog_open;   /* a bar is on screen and owes a closing newline */
+
+#define PROG_WIDTH 30
 
 /* Graceful stop, which is what makes --resume reachable. Matches are collected
  * in memory and printed at the end, so a scan killed at hour 30 loses all 30
@@ -101,18 +106,77 @@ static void progress_begin(long long total)
 {
 	prog_total = total;
 	prog_start = prog_last = time(NULL);
+	prog_bar = isatty(STDERR_FILENO);
+}
+
+/* The bar is for a human watching a terminal. Piped stderr keeps the plain
+ * one-line-per-tick form byte for byte: the GUI parses it (web/serve.py
+ * PROGRESS_RE) and a carriage return would leave that readline loop waiting
+ * for a newline that never comes. */
+/* No clear-to-end-of-line: `done` only ever grows and `prog_total` is fixed,
+ * so a redraw is never shorter than what it overwrites. */
+static void draw_bar(long long done, double pct)
+{
+	int i, fill = (int)(pct / 100.0 * PROG_WIDTH);
+
+	fputs("\rgpbpf: [", stderr);
+	for (i = 0; i < PROG_WIDTH; i++)
+		fputc(i < fill ? '#' : '-', stderr);
+	fprintf(stderr, "] %6.2f%%  %lld/%lld columns", pct, done, prog_total);
+	fflush(stderr);
 }
 
 void bd_progress(long long done)
 {
 	time_t now = time(NULL);
+	double pct;
 
 	if (now - prog_start < 2 || now == prog_last)
 		return;
 	prog_last = now;
-	fprintf(stderr, "gpbpf: progress %lld/%lld %.3f%%\n", done, prog_total,
-	        prog_total ? 100.0 * (double)done / (double)prog_total : 100.0);
+	pct = prog_total ? 100.0 * (double)done / (double)prog_total : 100.0;
+
+	if (!prog_bar) {
+		fprintf(stderr, "gpbpf: progress %lld/%lld %.3f%%\n", done,
+		        prog_total, pct);
+		fflush(stderr);
+		return;
+	}
+	draw_bar(done, pct);
+	prog_open = 1;
+}
+
+/* Sorting and writing come after the scan and report nothing on their own, but
+ * on a match-heavy search they are most of the wall time -- 13.6s of a 15s run
+ * at 387M matches, with the bar sitting at 100% looking hung. Narrated only
+ * past a match count where they are actually perceptible; below it the flash of
+ * a line nobody can read is just noise.
+ *
+ * Terminal only, like the bar. Piped stderr is the GUI's warning channel
+ * (web/serve.py drain_stderr), so a line it cannot parse as progress would
+ * reach the user as a problem. */
+#define PROG_PHASE_MIN 1000000
+
+static void prog_phase(const char *what)
+{
+	if (!prog_bar || nmatches < PROG_PHASE_MIN)
+		return;
+	/* Erase to end of line: this is shorter than the bar it overwrites. Costs
+	 * nothing that \r has not already assumed about the terminal. */
+	fprintf(stderr, "\r\033[Kgpbpf: %s %zu matches...", what, nmatches);
 	fflush(stderr);
+	prog_open = 1;
+}
+
+/* End the line the bar and the phases share, once there is nothing more for
+ * them to say. */
+static void prog_close(void)
+{
+	if (!prog_open)
+		return;
+	fputc('\n', stderr);
+	fflush(stderr);
+	prog_open = 0;
 }
 
 /* Drop everything at or past a flattened offset. See the call site. */
@@ -743,6 +807,11 @@ int main(int argc, char **argv)
 #else
 	cpu_search(&d, xf, zf, xt, zt, from);
 #endif
+	/* A completed run ends the bar at full rather than at whatever the last
+	 * tick happened to catch. A stopped one keeps its real figure -- the number
+	 * next to it is the resume point. */
+	if (prog_open && resume_at < 0)
+		draw_bar(prog_total, 100.0);
 
 	/* A stopped run promises that what it printed is complete up to the
 	 * resume point, so anything past that point has to go. The CPU path is
@@ -759,8 +828,16 @@ int main(int argc, char **argv)
 
 	/* Java emits matches in x-major, z-minor order; both parallel paths
 	 * produce them unordered, so sort before printing. */
+	prog_phase("sorting");
 	sort_matches();
+	/* Matches going to the terminal are about to scroll the status line away,
+	 * so close it now rather than leave a stray newline after the flood. */
+	if (isatty(STDOUT_FILENO))
+		prog_close();
+	else
+		prog_phase("writing");
 	emit_matches();
+	prog_close();
 
 	printf("search finished\n");
 

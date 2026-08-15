@@ -255,7 +255,11 @@ def drain_stderr(stream, err, rec):
     GUI shows warnings to the user -- left in `err` a long scan would bury a
     real warning under thousands of status lines.
     """
-    for line in stream:
+    # readline, not `for line in stream`: file-object iteration reads ahead into
+    # an 8 KB buffer and hands nothing over until it fills, which for ~45-byte
+    # progress lines means ~180 ticks of nothing and a progress box stuck at 0
+    # for every scan shorter than that.
+    for line in iter(stream.readline, b""):
         m = PROGRESS_RE.match(line)
         if not m:
             err.append(line)
@@ -799,14 +803,32 @@ def selftest(cfg):
           and (prec["done"], prec["total"]) == (50, 100))
 
     # and live, over the second connection, while a search is actually running.
-    # gpbpf stays silent for its first two seconds, so this has to outwait that.
+    #
+    # gpbpf stays silent for its first ~2s, so the scan has to outlast that or
+    # there is nothing to report: `forever` covers 1.9e9 columns, which scans in
+    # about 1.4s here, and sampling it caught zero ticks half the time. This one
+    # is 1e10 columns with a selective pattern -- the columns are the cost, not
+    # the matches, which at `forever`'s 20% hit rate would be gigabytes of RAM.
+    # Past the GUI's own area cap, which is server policy and not what this
+    # checks.
     jid = "selftest-progress"
+    cfg.max_area = max(cfg.max_area, 10_000_000_000)
+    slow = dict(forever, toX=100_000, toZ=100_000, job=jid,
+                patterns=[[[0, -60, 0, 1], [1, -60, 0, 1], [2, -60, 0, 1],
+                           [0, -60, 1, 1], [1, -60, 1, 1]]])
     out = {}
     runner = threading.Thread(target=lambda: out.update(zip(("d", "code"),
-                                                           post(dict(forever, job=jid)))))
+                                                           post(slow))))
     runner.start()
-    time.sleep(4.0)
-    got, code = post_to("/api/progress", {"job": jid})
+    # Poll rather than sample once: where the first tick lands depends on the
+    # machine and on where in the wall-clock second the run started, so a fixed
+    # sleep races the silent window at one end and the scan's end at the other.
+    got, code, deadline = {}, 0, time.monotonic() + 30
+    while time.monotonic() < deadline:
+        got, code = post_to("/api/progress", {"job": jid})
+        if got.get("done"):
+            break
+        time.sleep(0.25)
     post_to("/api/cancel", {"job": jid})
     runner.join(20)
     check("progress reports live columns (%s of %s)"
