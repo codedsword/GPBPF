@@ -112,12 +112,19 @@ it; both targets produce `./gpbpf`.
 It binds `127.0.0.1` and refuses searches that would match every column. `--host`
 exposes it to the network and warns when you use it.
 
-Searches are capped at 2 billion columns (about 44,700 × 44,700) so a stray zero
-cannot turn a ten-second search into an all-day one. Raise it with:
+The GUI caps searches at 2 billion columns (about 44,700 × 44,700) so a stray
+zero cannot turn a ten-second search into an all-day one. The cap is the
+server's, not the search engine's — the CLI is uncapped. Raise the GUI's with:
 
 ```sh
 make web AREA=20000000000          # or: python3 web/serve.py --max-area 20000000000
 ```
+
+For a genuinely large search, prefer copying the equivalent command from the
+bottom of the page and running `./gpbpf` yourself. The cap exists because this
+is a server: a browser has no Ctrl-C, so every run holds a handler thread and a
+child process until the cancel path reaches it, and `--host` can put that on the
+network. On the CLI you own the process and Ctrl-C is free.
 
 A running search can be stopped from the progress box. **Cancel search** kills
 the binary rather than only closing the connection — a search holds its handler
